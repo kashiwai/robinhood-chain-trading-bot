@@ -55,7 +55,15 @@
     "test:e2e": "vitest run tests/e2e --testTimeout 120000",
     "snapshot": "tsx scripts/capture-snapshot.ts",
     "testnet-trade": "tsx scripts/testnet-trade.ts",
-    "capture-session": "node scripts/capture-session.mjs"
+    "capture-session": "node scripts/capture-session.mjs",
+    "lint": "eslint src tests scripts",
+    "lint:fix": "eslint src tests scripts --fix",
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/**/*.{ts,mjs}\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/**/*.{ts,mjs}\"",
+    "audit:deps": "npm audit --omit=dev --audit-level=high",
+    "sbom": "cyclonedx-npm --output-file sbom.json --output-format json",
+    "secret-scan": "gitleaks detect --source . --no-git -v --redact",
+    "prepare": "husky"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.0",
@@ -64,12 +72,27 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@cyclonedx/cyclonedx-npm": "^6.0.1",
     "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^24.0.0",
     "@types/ws": "^8.18.0",
+    "@typescript-eslint/eslint-plugin": "^8.15.0",
+    "@typescript-eslint/parser": "^8.15.0",
+    "eslint": "^9.15.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-security": "^3.0.1",
+    "husky": "^9.1.6",
+    "lint-staged": "^15.2.10",
+    "prettier": "^3.3.3",
     "tsup": "^8.5.0",
     "tsx": "^4.19.0",
     "typescript": "^5.9.0",
-    "vitest": "^3.2.0"
+    "vitest": "^4.1.11"
+  },
+  "lint-staged": {
+    "*.ts": [
+      "eslint --fix",
+      "prettier --write"
+    ]
   }
 }

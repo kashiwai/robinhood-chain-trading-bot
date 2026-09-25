@@ -1,0 +1,9 @@
+npx lint-staged
+
+# Best-effort local secret scan. Not a substitute for the CI gitleaks job —
+# just catches an accidental `.env` `git add` before it ever leaves the laptop.
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks protect --staged --no-banner --redact
+else
+  echo "hood-traders: gitleaks not installed locally — CI's gitleaks job is the real gate for this commit."
+fi
