@@ -65,7 +65,11 @@ export class RiskEngine {
       const elapsed = (ctx.now - ctx.lastTradeAt) / 1000
       if (elapsed < this.limits.cooldownSeconds) {
         const wait = (this.limits.cooldownSeconds - elapsed).toFixed(1)
-        return { ok: false, reason: 'cooldown', detail: `cooldown active — ${wait}s until next trade allowed` }
+        return {
+          ok: false,
+          reason: 'cooldown',
+          detail: `cooldown active — ${wait}s until next trade allowed`,
+        }
       }
     }
 

@@ -55,7 +55,14 @@ const session = {
   equityUsd: summary.equityUsd,
   realizedUsd: summary.realizedUsd,
   openValueUsd: summary.openValueUsd,
-  perAgent: agents.map((a) => ({ id: a.id, strategy: a.strategy, ticks: a.ticks, trades: a.trades, refusals: a.refusals, lastError: a.lastError })),
+  perAgent: agents.map((a) => ({
+    id: a.id,
+    strategy: a.strategy,
+    ticks: a.ticks,
+    trades: a.trades,
+    refusals: a.refusals,
+    lastError: a.lastError,
+  })),
   journalExcerpt: excerpt,
 }
 

@@ -12,7 +12,9 @@ const MIME: Record<string, string> = {
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
-  const payload = JSON.stringify(body, (_key, value) => (typeof value === 'bigint' ? value.toString() : value))
+  const payload = JSON.stringify(body, (_key, value) =>
+    typeof value === 'bigint' ? value.toString() : value,
+  )
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
   res.end(payload)
 }
@@ -58,7 +60,11 @@ export function createDashboardServer(fleet: Fleet, staticRoot: string): Server 
       const agentId = decodeURIComponent(url.pathname.split('/')[3] ?? '')
       return json(res, 200, fleet.journal.recentTrades(agentId, 100))
     }
-    if (url.pathname.startsWith('/api/agents/') && url.pathname.endsWith('/journal') && req.method === 'GET') {
+    if (
+      url.pathname.startsWith('/api/agents/') &&
+      url.pathname.endsWith('/journal') &&
+      req.method === 'GET'
+    ) {
       const agentId = decodeURIComponent(url.pathname.split('/')[3] ?? '')
       return json(res, 200, fleet.journal.recentDecisions(agentId, 200))
     }

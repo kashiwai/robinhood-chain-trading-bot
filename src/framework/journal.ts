@@ -174,9 +174,10 @@ export class Journal {
 
   /** All trades across every agent, newest first — for the fleet-wide feed. */
   allRecentTrades(limit = 100): TradeRecord[] {
-    const rows = this.db
-      .prepare(`SELECT * FROM trades ORDER BY ts DESC LIMIT ?`)
-      .all(limit) as Record<string, unknown>[]
+    const rows = this.db.prepare(`SELECT * FROM trades ORDER BY ts DESC LIMIT ?`).all(limit) as Record<
+      string,
+      unknown
+    >[]
     return rows.map(rowToTrade)
   }
 

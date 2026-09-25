@@ -109,7 +109,8 @@ async function callProvider(
     if (!res.ok) throw providerError('anthropic', model, res.status, body)
     const data = JSON.parse(body) as { content?: { text?: string }[] }
     const text = data.content?.[0]?.text
-    if (!text) throw new Error(`hood-traders llm.ts: anthropic response had no content text: ${body.slice(0, 300)}`)
+    if (!text)
+      throw new Error(`hood-traders llm.ts: anthropic response had no content text: ${body.slice(0, 300)}`)
     return text
   }
 
@@ -136,7 +137,8 @@ async function callProvider(
   if (!res.ok) throw providerError(provider, model, res.status, body)
   const data = JSON.parse(body) as { choices?: { message?: { content?: string } }[] }
   const text = data.choices?.[0]?.message?.content
-  if (!text) throw new Error(`hood-traders llm.ts: ${provider} response had no message content: ${body.slice(0, 300)}`)
+  if (!text)
+    throw new Error(`hood-traders llm.ts: ${provider} response had no message content: ${body.slice(0, 300)}`)
   return text
 }
 
@@ -171,7 +173,8 @@ function providerError(provider: LlmProvider, model: string, status: number, bod
 /** Extract the first `{...}` blob from `text` and validate it as an {@link LlmVerdict}. Throws on any mismatch. */
 export function parseVerdict(text: string): LlmVerdict {
   const match = text.match(/\{[\s\S]*\}/)
-  if (!match) throw new Error(`hood-traders llm.ts: no JSON object found in LLM response: ${text.slice(0, 300)}`)
+  if (!match)
+    throw new Error(`hood-traders llm.ts: no JSON object found in LLM response: ${text.slice(0, 300)}`)
   let raw: unknown
   try {
     raw = JSON.parse(match[0])

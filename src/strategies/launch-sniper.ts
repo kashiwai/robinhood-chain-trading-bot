@@ -117,8 +117,10 @@ export class LaunchSniper implements Strategy {
       const ageSec = (ctx.now - pos.openedAt) / 1000
       const pnlPct = pos.markUsd !== null && pos.investedUsd > 0 ? pos.markUsd / pos.investedUsd - 1 : null
       let exitReason: string | null = null
-      if (pnlPct !== null && pnlPct >= this.p.takeProfitPct) exitReason = `take-profit ${(pnlPct * 100).toFixed(1)}%`
-      else if (pnlPct !== null && pnlPct <= -this.p.stopLossPct) exitReason = `stop-loss ${(pnlPct * 100).toFixed(1)}%`
+      if (pnlPct !== null && pnlPct >= this.p.takeProfitPct)
+        exitReason = `take-profit ${(pnlPct * 100).toFixed(1)}%`
+      else if (pnlPct !== null && pnlPct <= -this.p.stopLossPct)
+        exitReason = `stop-loss ${(pnlPct * 100).toFixed(1)}%`
       else if (ageSec >= this.p.maxHoldSeconds) exitReason = `time-exit ${Math.round(ageSec)}s held`
       if (exitReason) {
         intents.push({
@@ -152,7 +154,13 @@ export class LaunchSniper implements Strategy {
     const { launch } = candidate
     const ageSec = (ctx.now - candidate.seenAt) / 1000
     if (ageSec > this.p.maxLaunchAgeSeconds) {
-      return { alert: { level: 'info', message: `skip ${launch.token}: stale (${Math.round(ageSec)}s old)`, meta: {} } }
+      return {
+        alert: {
+          level: 'info',
+          message: `skip ${launch.token}: stale (${Math.round(ageSec)}s old)`,
+          meta: {},
+        },
+      }
     }
     // already holding it?
     if (ctx.positions.some((p) => p.token.toLowerCase() === launch.token.toLowerCase())) return {}
@@ -162,13 +170,21 @@ export class LaunchSniper implements Strategy {
     // Filter 1 — route exists (Odyssey pre-graduation tokens fail here and are skipped).
     const buyQuote = await ctx.market.quoteBuy(ctx.quoteToken, launch.token, amountIn)
     if (!buyQuote || buyQuote.amountOut <= 0n) {
-      return { alert: { level: 'info', message: `skip ${launch.token}: no liquid Uniswap route`, meta: { launchpad: launch.launchpad } } }
+      return {
+        alert: {
+          level: 'info',
+          message: `skip ${launch.token}: no liquid Uniswap route`,
+          meta: { launchpad: launch.launchpad },
+        },
+      }
     }
 
     // Filter 2 — round-trip retention (honeypot / thin-pool guard).
     const sellQuote = await ctx.market.quoteSell(launch.token, ctx.quoteToken, buyQuote.amountOut)
     if (!sellQuote || sellQuote.amountOut <= 0n) {
-      return { alert: { level: 'warn', message: `skip ${launch.token}: cannot sell back (honeypot?)`, meta: {} } }
+      return {
+        alert: { level: 'warn', message: `skip ${launch.token}: cannot sell back (honeypot?)`, meta: {} },
+      }
     }
     const retention = Number(sellQuote.amountOut) / Number(amountIn)
     if (1 - retention > this.p.maxRoundTripLossPct) {
@@ -212,12 +228,17 @@ export class LaunchSniper implements Strategy {
       const [supply, bal] = await ctx.market.client.public.multicall({
         contracts: [
           { address: launch.token, abi: erc20Abi, functionName: 'totalSupply' as const },
-          { address: launch.token, abi: erc20Abi, functionName: 'balanceOf' as const, args: [launch.creator] as const },
+          {
+            address: launch.token,
+            abi: erc20Abi,
+            functionName: 'balanceOf' as const,
+            args: [launch.creator] as const,
+          },
         ],
         allowFailure: false,
       })
       if ((supply as bigint) === 0n) return null
-      return Number(formatUnits((bal as bigint) * 10_000n / (supply as bigint), 4))
+      return Number(formatUnits(((bal as bigint) * 10_000n) / (supply as bigint), 4))
     } catch {
       return null
     }

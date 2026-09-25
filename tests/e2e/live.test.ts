@@ -50,7 +50,10 @@ describe('live: a full fleet boots against mainnet and ticks without error', () 
   })
 
   it('runs one real tick per agent against live data with zero errors', async () => {
-    const config = loadFleetConfig({ HOOD_NETWORK: 'mainnet', HOOD_TRADERS_DB: ':memory:' } as NodeJS.ProcessEnv)
+    const config = loadFleetConfig({
+      HOOD_NETWORK: 'mainnet',
+      HOOD_TRADERS_DB: ':memory:',
+    } as NodeJS.ProcessEnv)
     fleet = new Fleet(config)
     fleet.addAgents([
       { id: 'e2e-sniper', strategy: new LaunchSniper(), tickIntervalMs: 999_999_999 },

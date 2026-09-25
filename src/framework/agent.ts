@@ -5,15 +5,7 @@ import type { Market } from './market.js'
 import { RiskEngine, utcDayStart } from './risk.js'
 import type { KillSwitch } from './kill.js'
 import type { Strategy } from './strategy.js'
-import type {
-  AgentStatus,
-  Decision,
-  Intent,
-  Mode,
-  Position,
-  RiskLimits,
-  TradeRecord,
-} from './types.js'
+import type { AgentStatus, Decision, Intent, Mode, Position, RiskLimits, TradeRecord } from './types.js'
 
 /** Everything an {@link Agent} is constructed with. */
 export interface AgentOptions {
@@ -92,7 +84,13 @@ export class Agent {
     if (this.running) return
     this.running = true
     const log = (message: string, meta: Record<string, unknown> = {}) =>
-      this.journal.recordDecision({ agentId: this.id, ts: this.clock(), kind: 'observe', detail: message, meta })
+      this.journal.recordDecision({
+        agentId: this.id,
+        ts: this.clock(),
+        kind: 'observe',
+        detail: message,
+        meta,
+      })
     await this.strategy.start?.({ market: this.market, log })
     this.kill.onKill((reason) => log(`kill switch tripped: ${reason} — halting new orders`))
     this.scheduleTick()
@@ -306,7 +304,11 @@ export class Agent {
     if (!this.account) return null
     try {
       const tx = buildSwapTx(this.market.client, sim, { slippageBps })
-      await ensureApproval(this.market.client, intent.side === 'buy' ? intent.quoteToken : intent.token, intent.amountIn)
+      await ensureApproval(
+        this.market.client,
+        intent.side === 'buy' ? intent.quoteToken : intent.token,
+        intent.amountIn,
+      )
       const hash = await this.market.client.wallet!.sendTransaction({
         to: tx.to,
         data: tx.data,
@@ -354,7 +356,8 @@ export class Agent {
     // or past 2^53) don't lose precision through a Number() round-trip.
     const fraction = existing.amount > 0n ? Number(sellAmount) / Number(existing.amount) : 1
     const costFractionUsd = existing.investedUsd * fraction
-    const costBasisSold = existing.amount > 0n ? (existing.costBasis * sellAmount) / existing.amount : existing.costBasis
+    const costBasisSold =
+      existing.amount > 0n ? (existing.costBasis * sellAmount) / existing.amount : existing.costBasis
     this.realizedUsd += notionalUsd - costFractionUsd
     existing.amount -= sellAmount
     existing.costBasis -= costBasisSold

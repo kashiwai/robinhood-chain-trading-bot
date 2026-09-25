@@ -23,7 +23,13 @@ async function main() {
     symbols.map(async (t) => {
       try {
         const q = await getQuote(hood, t.symbol)
-        return { symbol: t.symbol, address: t.address, priceUsd: q.priceUsd, ageSeconds: q.ageSeconds, roundId: q.roundId.toString() }
+        return {
+          symbol: t.symbol,
+          address: t.address,
+          priceUsd: q.priceUsd,
+          ageSeconds: q.ageSeconds,
+          roundId: q.roundId.toString(),
+        }
       } catch (e) {
         return { symbol: t.symbol, address: t.address, error: e instanceof Error ? e.message : String(e) }
       }
@@ -34,7 +40,11 @@ async function main() {
   let ethUsd: number | null = null
   try {
     const probe = parseUnits('0.01', 18)
-    const q = await quoteSwap(hood, { tokenIn: MAINNET_ADDRESSES.weth, tokenOut: MAINNET_ADDRESSES.usdg, amountIn: probe })
+    const q = await quoteSwap(hood, {
+      tokenIn: MAINNET_ADDRESSES.weth,
+      tokenOut: MAINNET_ADDRESSES.usdg,
+      amountIn: probe,
+    })
     ethUsd = Number(formatUnits(q.amountOut, 6)) / 0.01
   } catch {
     ethUsd = null
@@ -46,7 +56,11 @@ async function main() {
     symbols.slice(0, 3).map(async (t) => {
       try {
         const probe = parseUnits('1', 18)
-        const q = await quoteSwap(hood, { tokenIn: t.address, tokenOut: MAINNET_ADDRESSES.usdg, amountIn: probe })
+        const q = await quoteSwap(hood, {
+          tokenIn: t.address,
+          tokenOut: MAINNET_ADDRESSES.usdg,
+          amountIn: probe,
+        })
         return { symbol: t.symbol, address: t.address, dexPriceUsd: Number(formatUnits(q.amountOut, 6)) }
       } catch (e) {
         return { symbol: t.symbol, address: t.address, error: e instanceof Error ? e.message : String(e) }

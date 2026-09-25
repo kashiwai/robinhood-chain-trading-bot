@@ -35,7 +35,9 @@ async function main(): Promise<void> {
     ])
     agentIds.push('llm-1')
   } else {
-    console.warn('HOOD_LLM_PROVIDER/HOOD_LLM_API_KEY not set: llm-strategist disabled (the other 3 strategies still run).')
+    console.warn(
+      'HOOD_LLM_PROVIDER/HOOD_LLM_API_KEY not set: llm-strategist disabled (the other 3 strategies still run).',
+    )
   }
 
   const banner = [

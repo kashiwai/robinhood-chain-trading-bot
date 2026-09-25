@@ -87,7 +87,13 @@ describe('Journal', () => {
 
   it('recordDecision + recentDecisions round-trips kind/detail/meta', () => {
     journal = new Journal(':memory:')
-    journal.recordDecision({ agentId: 'agent-1', ts: 1, kind: 'refused', detail: 'cap breach', meta: { reason: 'daily_cap' } })
+    journal.recordDecision({
+      agentId: 'agent-1',
+      ts: 1,
+      kind: 'refused',
+      detail: 'cap breach',
+      meta: { reason: 'daily_cap' },
+    })
     const [row] = journal.recentDecisions('agent-1', 1)
     expect(row.kind).toBe('refused')
     expect(row.detail).toBe('cap breach')

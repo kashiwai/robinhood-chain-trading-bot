@@ -22,7 +22,10 @@ function ctxFor(market: FakeMarket, now: number): StrategyTickContext {
   }
 }
 
-function seeded(strategist: LlmStrategist, launch: { token: Address; creator: Address; launchpad: 'noxa' | 'odyssey'; pool: Address | null }) {
+function seeded(
+  strategist: LlmStrategist,
+  launch: { token: Address; creator: Address; launchpad: 'noxa' | 'odyssey'; pool: Address | null },
+) {
   ;(strategist as unknown as { queue: { launch: typeof launch; seenAt: number }[] }).queue.push({
     launch: { ...launch, blockNumber: 1n, transactionHash: '0xdead' as `0x${string}` },
     seenAt: Date.now(),
@@ -31,12 +34,16 @@ function seeded(strategist: LlmStrategist, launch: { token: Address; creator: Ad
 
 describe('parseVerdict', () => {
   it('parses a clean JSON object', () => {
-    const v = parseVerdict('{"buy": true, "confidence": 0.8, "thesis": "clean retention, low deployer share"}')
+    const v = parseVerdict(
+      '{"buy": true, "confidence": 0.8, "thesis": "clean retention, low deployer share"}',
+    )
     expect(v).toEqual({ buy: true, confidence: 0.8, thesis: 'clean retention, low deployer share' })
   })
 
   it('extracts JSON embedded in surrounding prose', () => {
-    const v = parseVerdict('Sure, here is my verdict:\n{"buy": false, "confidence": 0.3, "thesis": "thin liquidity"}\nHope that helps!')
+    const v = parseVerdict(
+      'Sure, here is my verdict:\n{"buy": false, "confidence": 0.3, "thesis": "thin liquidity"}\nHope that helps!',
+    )
     expect(v.buy).toBe(false)
     expect(v.confidence).toBe(0.3)
   })
@@ -51,7 +58,9 @@ describe('parseVerdict', () => {
   })
 
   it('throws when "buy" is not a boolean', () => {
-    expect(() => parseVerdict('{"buy": "yes", "confidence": 0.5, "thesis": "x"}')).toThrow(/missing boolean "buy"/)
+    expect(() => parseVerdict('{"buy": "yes", "confidence": 0.5, "thesis": "x"}')).toThrow(
+      /missing boolean "buy"/,
+    )
   })
 
   it('throws when "thesis" is missing or empty', () => {
@@ -69,7 +78,10 @@ describe('judgeLaunch — provider dispatch', () => {
   it('calls the Anthropic Messages API and parses its response shape', async () => {
     const fetchMock = vi.fn(async (url: string) => {
       expect(url).toBe('https://api.anthropic.com/v1/messages')
-      return new Response(JSON.stringify({ content: [{ text: '{"buy": true, "confidence": 0.9, "thesis": "great"}' }] }), { status: 200 })
+      return new Response(
+        JSON.stringify({ content: [{ text: '{"buy": true, "confidence": 0.9, "thesis": "great"}' }] }),
+        { status: 200 },
+      )
     })
     global.fetch = fetchMock as unknown as typeof fetch
 
@@ -81,7 +93,12 @@ describe('judgeLaunch — provider dispatch', () => {
   it('calls the OpenAI-compatible chat-completions shape for openai/groq/openrouter', async () => {
     const fetchMock = vi.fn(async (url: string) => {
       expect(url).toBe('https://api.groq.com/openai/v1/chat/completions')
-      return new Response(JSON.stringify({ choices: [{ message: { content: '{"buy": false, "confidence": 0.2, "thesis": "skip"}' } }] }), { status: 200 })
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '{"buy": false, "confidence": 0.2, "thesis": "skip"}' } }],
+        }),
+        { status: 200 },
+      )
     })
     global.fetch = fetchMock as unknown as typeof fetch
 
@@ -90,8 +107,12 @@ describe('judgeLaunch — provider dispatch', () => {
   })
 
   it('throws a descriptive error on a non-2xx response', async () => {
-    global.fetch = vi.fn(async () => new Response('model not found', { status: 404 })) as unknown as typeof fetch
-    await expect(judgeLaunch({ provider: 'openai', apiKey: 'test-key' }, 'brief')).rejects.toThrow(/HOOD_LLM_MODEL/)
+    global.fetch = vi.fn(
+      async () => new Response('model not found', { status: 404 }),
+    ) as unknown as typeof fetch
+    await expect(judgeLaunch({ provider: 'openai', apiKey: 'test-key' }, 'brief')).rejects.toThrow(
+      /HOOD_LLM_MODEL/,
+    )
   })
 })
 
@@ -108,12 +129,19 @@ describe('LlmStrategist.tick', () => {
   })
 
   function verdictResponse(buy: boolean, confidence: number, thesis = 'because') {
-    return new Response(JSON.stringify({ content: [{ text: JSON.stringify({ buy, confidence, thesis }) }] }), { status: 200 })
+    return new Response(
+      JSON.stringify({ content: [{ text: JSON.stringify({ buy, confidence, thesis }) }] }),
+      { status: 200 },
+    )
   }
 
   it('turns a high-confidence buy verdict into a buy Intent', async () => {
     fetchMock.mockResolvedValueOnce(verdictResponse(true, 0.9, 'clean signals'))
-    const strategist = new LlmStrategist({ llm: { provider: 'anthropic', apiKey: 'k' }, minConfidence: 0.6, entryWeth: 0.01 })
+    const strategist = new LlmStrategist({
+      llm: { provider: 'anthropic', apiKey: 'k' },
+      minConfidence: 0.6,
+      entryWeth: 0.01,
+    })
     const market = new FakeMarket()
     const amountIn = parseEther('0.01')
     market.buyRoutes.set(TOKEN_A.toLowerCase(), parseEther('1000'))

@@ -263,7 +263,15 @@ describe('Agent — risk cap enforcement end-to-end', () => {
     // exceeds both caps but must NOT be refused because it reduces risk.
     market.sellRoutes.set(TOKEN_A.toLowerCase(), parseUnits('9999', 6))
     strategy.enqueue([
-      { side: 'sell', token: TOKEN_A, tokenSymbol: 'MEME', amountIn: parseEther('1000'), quoteToken: USDG, quoteSymbol: 'USDG', reason: 'test exit' },
+      {
+        side: 'sell',
+        token: TOKEN_A,
+        tokenSymbol: 'MEME',
+        amountIn: parseEther('1000'),
+        quoteToken: USDG,
+        quoteSymbol: 'USDG',
+        reason: 'test exit',
+      },
     ])
     await agent.tick()
 

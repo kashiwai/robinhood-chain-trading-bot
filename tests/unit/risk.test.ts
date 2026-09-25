@@ -63,7 +63,12 @@ describe('RiskEngine', () => {
   it('refuses a buy that breaches the fleet-wide daily spend cap even under the per-agent cap', () => {
     const risk = new RiskEngine(LIMITS)
     const verdict = risk.check(
-      baseCtx({ notionalUsd: 10, positionUsdAfter: 10, fleetSpentTodayUsd: 245, fleetMaxDailySpendUsdg: 250 }),
+      baseCtx({
+        notionalUsd: 10,
+        positionUsdAfter: 10,
+        fleetSpentTodayUsd: 245,
+        fleetMaxDailySpendUsdg: 250,
+      }),
     )
     expect(verdict.ok).toBe(false)
     expect(verdict.reason).toBe('fleet_daily_cap')
@@ -92,7 +97,13 @@ describe('RiskEngine', () => {
   it('exempts sells from position and daily-spend caps', () => {
     const risk = new RiskEngine(LIMITS)
     const verdict = risk.check(
-      baseCtx({ side: 'sell', notionalUsd: 1000, positionUsdAfter: 0, spentTodayUsd: 99, fleetSpentTodayUsd: 249 }),
+      baseCtx({
+        side: 'sell',
+        notionalUsd: 1000,
+        positionUsdAfter: 0,
+        spentTodayUsd: 99,
+        fleetSpentTodayUsd: 249,
+      }),
     )
     expect(verdict.ok).toBe(true)
   })
@@ -100,7 +111,9 @@ describe('RiskEngine', () => {
   it('still refuses a sell during cooldown or under the kill switch', () => {
     const risk = new RiskEngine(LIMITS)
     expect(risk.check(baseCtx({ side: 'sell', killed: true })).reason).toBe('kill_switch')
-    expect(risk.check(baseCtx({ side: 'sell', lastTradeAt: 999_990, now: 1_000_000 })).reason).toBe('cooldown')
+    expect(risk.check(baseCtx({ side: 'sell', lastTradeAt: 999_990, now: 1_000_000 })).reason).toBe(
+      'cooldown',
+    )
   })
 
   it('refuses a zero or negative notional', () => {

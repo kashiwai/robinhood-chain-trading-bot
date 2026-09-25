@@ -1,10 +1,6 @@
 import { getRecentLaunches, parseUsdg, type Launch } from 'hoodchain'
 import type { Address } from 'viem'
-import type {
-  Strategy,
-  StrategyMeta,
-  StrategyTickContext,
-} from '../framework/strategy.js'
+import type { Strategy, StrategyMeta, StrategyTickContext } from '../framework/strategy.js'
 import type { Decision, Intent, Alert } from '../framework/types.js'
 
 /** Tunables for {@link Momentum}. */
@@ -118,7 +114,13 @@ export class Momentum implements Strategy {
         this.peakSinceEntry.set(key, peak)
         const drawdown = peak > 0 ? 1 - spot.priceUsd / peak : 0
         if (drawdown >= this.p.trailingStopPct) {
-          intents.push(this.exitIntent(pos, ctx, `trailing stop: ${(drawdown * 100).toFixed(1)}% off peak $${peak.toFixed(6)}`))
+          intents.push(
+            this.exitIntent(
+              pos,
+              ctx,
+              `trailing stop: ${(drawdown * 100).toFixed(1)}% off peak $${peak.toFixed(6)}`,
+            ),
+          )
           this.peakSinceEntry.delete(key)
           continue
         }
@@ -161,7 +163,11 @@ export class Momentum implements Strategy {
     return { intents, alerts }
   }
 
-  private exitIntent(pos: StrategyTickContext['positions'][number], ctx: StrategyTickContext, reason: string): Intent {
+  private exitIntent(
+    pos: StrategyTickContext['positions'][number],
+    ctx: StrategyTickContext,
+    reason: string,
+  ): Intent {
     return {
       side: 'sell',
       token: pos.token,
@@ -176,7 +182,9 @@ export class Momentum implements Strategy {
   private async discover(ctx: StrategyTickContext): Promise<void> {
     let launches: Launch[]
     try {
-      launches = await getRecentLaunches(ctx.market.client, { lookbackBlocks: this.p.discoveryLookbackBlocks })
+      launches = await getRecentLaunches(ctx.market.client, {
+        lookbackBlocks: this.p.discoveryLookbackBlocks,
+      })
     } catch (err) {
       ctx.log(`momentum discovery failed: ${err instanceof Error ? err.message : String(err)}`)
       return
@@ -190,12 +198,17 @@ export class Momentum implements Strategy {
       if (this.history.has(key)) continue
       const spot = await ctx.market.spotPrice(l.token)
       if (!spot) continue
-      this.history.set(key, { token: l.token, symbol: shortToken(l.token), samples: [{ ts: ctx.now, priceUsd: spot.priceUsd }] })
+      this.history.set(key, {
+        token: l.token,
+        symbol: shortToken(l.token),
+        samples: [{ ts: ctx.now, priceUsd: spot.priceUsd }],
+      })
     }
     // Evict tokens no longer in the discovered window to keep the tracked set fresh.
     const keep = new Set(candidates.map((l) => l.token.toLowerCase()))
     for (const key of [...this.history.keys()]) {
-      if (!keep.has(key) && !ctx.positions.some((p) => p.token.toLowerCase() === key)) this.history.delete(key)
+      if (!keep.has(key) && !ctx.positions.some((p) => p.token.toLowerCase() === key))
+        this.history.delete(key)
     }
   }
 }

@@ -1,15 +1,11 @@
 import { getStockToken, parseUsdg } from 'hoodchain'
-import type {
-  Strategy,
-  StrategyMeta,
-  StrategyTickContext,
-} from '../framework/strategy.js'
+import type { Strategy, StrategyMeta, StrategyTickContext } from '../framework/strategy.js'
 import type { Alert, Decision, Intent } from '../framework/types.js'
 
 /** Tunables for {@link PremiumWatch}. */
 export interface PremiumWatchParams {
   /** Symbols to watch. Defaults to a handful of the most liquid priced Stock Tokens. */
-  symbols: string[];
+  symbols: string[]
   /** Premium/discount (bps, |dex - oracle| / oracle) that triggers an alert. */
   alertThresholdBps: number
   /** Premium/discount (bps) that triggers a convergence TRADE — only reachable in trade-eligible config. */

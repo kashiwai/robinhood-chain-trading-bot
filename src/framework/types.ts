@@ -101,7 +101,7 @@ export interface DecisionRecord {
   id?: number
   agentId: string
   ts: number
-  kind: 'refused' | 'alert' | 'observe';
+  kind: 'refused' | 'alert' | 'observe'
   detail: string
   meta: Record<string, unknown>
 }
