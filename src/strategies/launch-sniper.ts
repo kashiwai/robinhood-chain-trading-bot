@@ -1,19 +1,24 @@
 import { erc20Abi, type Launch } from 'hoodchain'
 import { formatUnits, parseEther, type Address } from 'viem'
 import type { Strategy, StrategyMeta, StrategyTickContext } from '../framework/strategy.js'
-import type { Decision, Intent, Alert } from '../framework/types.js'
+import type { Decision, Intent, Alert, Position } from '../framework/types.js'
 import { EventQueue } from '../discovery/event-queue.js'
 import { LAUNCH_KIND, decodeLaunchPayload } from '../discovery/launch-detector.js'
+import {
+  evaluateExit,
+  INITIAL_EXIT_STATE,
+  DEFAULT_EXIT_CONFIG,
+  type ExitState,
+  type ExitTierConfig,
+} from '../exits/exit-engine.js'
 
 /** Tunables for {@link LaunchSniper}. */
 export interface LaunchSniperParams {
   /** WETH spent per entry. */
   entryWeth: number
-  /** Take profit as a fraction (0.5 = +50%). */
-  takeProfitPct: number
-  /** Stop loss as a fraction (0.3 = -30%). */
-  stopLossPct: number
-  /** Force-exit a position after this many seconds regardless of PnL. */
+  /** Level 9 exit tier ladder — stop loss / TP1 / TP2 / trailing stop (see exits/exit-engine.ts). Merged over the defaults, so passing just e.g. `{ stopLossPct: 0.2 }` leaves TP1/TP2/trailing untouched. */
+  exitConfig: Partial<ExitTierConfig>
+  /** Force-exit a position after this many seconds regardless of PnL — independent of the tier ladder (a plain time cap, not itself a tier). */
   maxHoldSeconds: number
   /** Reject a launch if the deployer still holds more than this fraction of supply. */
   maxDeployerPct: number
@@ -25,8 +30,7 @@ export interface LaunchSniperParams {
 
 const DEFAULTS: LaunchSniperParams = {
   entryWeth: 0.01,
-  takeProfitPct: 0.6,
-  stopLossPct: 0.35,
+  exitConfig: {},
   maxHoldSeconds: 30 * 60,
   maxDeployerPct: 0.15,
   maxRoundTripLossPct: 0.35,
@@ -70,9 +74,12 @@ export class LaunchSniper implements Strategy {
    * existing standalone construction (tests, `new LaunchSniper()`) keeps
    * working without requiring every caller to wire discovery.
    */
+  private readonly exitConfig: ExitTierConfig
+
   constructor(params: Partial<LaunchSniperParams> = {}, queue: EventQueue = new EventQueue(':memory:')) {
     this.p = { ...DEFAULTS, ...params }
     this.queue = queue
+    this.exitConfig = { ...DEFAULT_EXIT_CONFIG, ...this.p.exitConfig }
   }
 
   get meta(): StrategyMeta {
@@ -95,26 +102,34 @@ export class LaunchSniper implements Strategy {
     const alerts: Alert[] = []
 
     // ── exits first (protect open risk before taking on more) ──────────────────
+    // Level 9 tier ladder: stop-loss (full exit) / TP1 (sell 25% of original)
+    // / TP2 (sell another 25% of original) / trailing stop on the remaining
+    // 50% — see exits/exit-engine.ts. Exit state (which tiers have already
+    // fired, the post-TP2 peak) is persisted in `pos.meta.exitState` across
+    // ticks, since `pos` is the same object Agent holds internally.
     for (const pos of ctx.positions) {
       const ageSec = (ctx.now - pos.openedAt) / 1000
       const pnlPct = pos.markUsd !== null && pos.investedUsd > 0 ? pos.markUsd / pos.investedUsd - 1 : null
-      let exitReason: string | null = null
-      if (pnlPct !== null && pnlPct >= this.p.takeProfitPct)
-        exitReason = `take-profit ${(pnlPct * 100).toFixed(1)}%`
-      else if (pnlPct !== null && pnlPct <= -this.p.stopLossPct)
-        exitReason = `stop-loss ${(pnlPct * 100).toFixed(1)}%`
-      else if (ageSec >= this.p.maxHoldSeconds) exitReason = `time-exit ${Math.round(ageSec)}s held`
-      if (exitReason) {
-        intents.push({
-          side: 'sell',
-          token: pos.token,
-          tokenSymbol: pos.tokenSymbol,
-          amountIn: pos.amount,
-          quoteToken: pos.quoteToken,
-          quoteSymbol: pos.quoteSymbol,
-          reason: exitReason,
-          meta: { pnlPct },
-        })
+
+      if (pnlPct === null) {
+        if (ageSec >= this.p.maxHoldSeconds) {
+          intents.push(
+            sellIntent(pos, 1, `time-exit ${Math.round(ageSec)}s held (no live mark to judge PnL against)`),
+          )
+        }
+        continue
+      }
+
+      const exitState = (pos.meta.exitState as ExitState | undefined) ?? INITIAL_EXIT_STATE
+      const { decision, newState } = evaluateExit(pnlPct, exitState, this.exitConfig)
+      pos.meta.exitState = newState
+
+      if (decision) {
+        intents.push(
+          sellIntent(pos, decision.sellFractionOfCurrent, decision.reason, { pnlPct, tier: decision.tier }),
+        )
+      } else if (ageSec >= this.p.maxHoldSeconds) {
+        intents.push(sellIntent(pos, 1, `time-exit ${Math.round(ageSec)}s held`, { pnlPct }))
       }
     }
 
@@ -249,4 +264,25 @@ export class LaunchSniper implements Strategy {
 
 function shortToken(addr: Address): string {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`
+}
+
+/** Builds a sell Intent for `fractionOfCurrent` (0-1) of a position's CURRENTLY held amount. */
+function sellIntent(
+  pos: Position,
+  fractionOfCurrent: number,
+  reason: string,
+  extraMeta: Record<string, unknown> = {},
+): Intent {
+  const fractionBps = BigInt(Math.round(Math.max(0, Math.min(1, fractionOfCurrent)) * 10_000))
+  const amountIn = fractionBps >= 10_000n ? pos.amount : (pos.amount * fractionBps) / 10_000n
+  return {
+    side: 'sell',
+    token: pos.token,
+    tokenSymbol: pos.tokenSymbol,
+    amountIn,
+    quoteToken: pos.quoteToken,
+    quoteSymbol: pos.quoteSymbol,
+    reason,
+    meta: extraMeta,
+  }
 }

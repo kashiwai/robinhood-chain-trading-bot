@@ -59,39 +59,66 @@ function position(overrides: Partial<Position> = {}): Position {
   }
 }
 
-describe('LaunchSniper — exits (pure math, no market calls)', () => {
-  it('exits on take-profit once markUsd/investedUsd clears the threshold', async () => {
-    const sniper = new LaunchSniper({ takeProfitPct: 0.5 })
+describe('LaunchSniper — exits (Level 9 tier ladder, pure math, no market calls)', () => {
+  it('TP1 fires at the configured threshold, selling a partial fraction (not the whole position)', async () => {
+    const sniper = new LaunchSniper({ exitConfig: { tp1Pct: 0.5, tp1SellFraction: 0.25 } })
     const market = new FakeMarket()
-    const pos = position({ investedUsd: 20, markUsd: 32, openedAt: 0 }) // +60%
+    const pos = position({ investedUsd: 20, markUsd: 32, openedAt: 0 }) // +60%, clears the 50% TP1 bar
     const decision = await sniper.tick(ctxFor(market, [pos], 60_000, 'weth'))
     expect(decision.intents).toHaveLength(1)
     expect(decision.intents[0]?.side).toBe('sell')
-    expect(decision.intents[0]?.reason).toMatch(/take-profit/)
+    expect(decision.intents[0]?.reason).toMatch(/take-profit-1/)
+    expect(decision.intents[0]?.amountIn).toBe(pos.amount / 4n) // 25% of the position
+    expect(pos.meta.exitState).toEqual({ tp1Taken: true, tp2Taken: false, peakPnlPctSinceTp2: -Infinity })
   })
 
-  it('exits on stop-loss once markUsd/investedUsd breaches the floor', async () => {
-    const sniper = new LaunchSniper({ stopLossPct: 0.3 })
+  it('exits fully on stop-loss once markUsd/investedUsd breaches the floor', async () => {
+    const sniper = new LaunchSniper({ exitConfig: { stopLossPct: 0.3 } })
     const market = new FakeMarket()
     const pos = position({ investedUsd: 20, markUsd: 12, openedAt: 0 }) // -40%
     const decision = await sniper.tick(ctxFor(market, [pos], 60_000, 'weth'))
     expect(decision.intents[0]?.reason).toMatch(/stop-loss/)
+    expect(decision.intents[0]?.amountIn).toBe(pos.amount) // full exit
   })
 
   it('force-exits after maxHoldSeconds regardless of PnL', async () => {
-    const sniper = new LaunchSniper({ maxHoldSeconds: 60, takeProfitPct: 10, stopLossPct: 10 })
+    const sniper = new LaunchSniper({ maxHoldSeconds: 60, exitConfig: { tp1Pct: 10, stopLossPct: 10 } })
     const market = new FakeMarket()
     const pos = position({ investedUsd: 20, markUsd: 20.5, openedAt: 0 }) // flat PnL, well within TP/SL
     const decision = await sniper.tick(ctxFor(market, [pos], 120_000, 'weth')) // 120s held > 60s max
     expect(decision.intents[0]?.reason).toMatch(/time-exit/)
   })
 
-  it('holds a position inside all three bands', async () => {
-    const sniper = new LaunchSniper({ takeProfitPct: 0.5, stopLossPct: 0.3, maxHoldSeconds: 600 })
+  it('holds a position inside every band (no tier cleared, well under the time cap)', async () => {
+    const sniper = new LaunchSniper({ exitConfig: { tp1Pct: 0.5, stopLossPct: 0.3 }, maxHoldSeconds: 600 })
     const market = new FakeMarket()
     const pos = position({ investedUsd: 20, markUsd: 21, openedAt: 0 }) // +5%, 30s held
     const decision = await sniper.tick(ctxFor(market, [pos], 30_000, 'weth'))
     expect(decision.intents).toHaveLength(0)
+  })
+
+  it('a full TP1 -> TP2 -> trailing-stop sequence plays out across ticks, exit state persisted in pos.meta', async () => {
+    const sniper = new LaunchSniper({ exitConfig: { tp1Pct: 0.2, tp2Pct: 0.4, trailingStopPct: 0.15 } })
+    const market = new FakeMarket()
+    const pos = position({ investedUsd: 20, markUsd: 24.1, openedAt: 0 }) // +20.5% -> clears the 20% TP1 bar
+    // (24.1, not 24 exactly — 24/20-1 lands a hair under 0.2 in IEEE754 float subtraction, which would
+    // miss the >= 0.2 gate; using a value unambiguously past the threshold avoids that, same as any
+    // float-threshold comparison in real market data, which is never exactly on the boundary either.)
+
+    let decision = await sniper.tick(ctxFor(market, [pos], 10_000, 'weth'))
+    expect(decision.intents[0]?.reason).toMatch(/take-profit-1/)
+
+    pos.markUsd = 28.1 // +40.5% -> clears the 40% TP2 bar
+    decision = await sniper.tick(ctxFor(market, [pos], 20_000, 'weth'))
+    expect(decision.intents[0]?.reason).toMatch(/take-profit-2/)
+
+    pos.markUsd = 26 // back to +30%, 10pt off the 40% peak — inside the 15pt trailing band, holds
+    decision = await sniper.tick(ctxFor(market, [pos], 30_000, 'weth'))
+    expect(decision.intents).toHaveLength(0)
+
+    pos.markUsd = 22.8 // +14%, 26pt off the 40% peak — past the 15pt trail
+    decision = await sniper.tick(ctxFor(market, [pos], 40_000, 'weth'))
+    expect(decision.intents[0]?.reason).toMatch(/trailing-stop/)
   })
 })
 
