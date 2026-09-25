@@ -1,12 +1,9 @@
-import { erc20Abi, watchLaunches, type Launch } from 'hoodchain'
+import { erc20Abi, type Launch } from 'hoodchain'
 import { formatUnits, parseEther, type Address } from 'viem'
-import type {
-  Strategy,
-  StrategyMeta,
-  StrategyStartContext,
-  StrategyTickContext,
-} from '../framework/strategy.js'
+import type { Strategy, StrategyMeta, StrategyTickContext } from '../framework/strategy.js'
 import type { Decision, Intent, Alert } from '../framework/types.js'
+import { EventQueue } from '../discovery/event-queue.js'
+import { LAUNCH_KIND, decodeLaunchPayload } from '../discovery/launch-detector.js'
 
 /** Tunables for {@link LaunchSniper}. */
 export interface LaunchSniperParams {
@@ -36,11 +33,6 @@ const DEFAULTS: LaunchSniperParams = {
   maxLaunchAgeSeconds: 5 * 60,
 }
 
-interface Candidate {
-  launch: Launch
-  seenAt: number
-}
-
 /**
  * launch-sniper — enter brand-new launchpad coins that clear objective safety
  * filters, then exit on take-profit, stop, or a hard time limit.
@@ -65,12 +57,22 @@ export class LaunchSniper implements Strategy {
   readonly title = 'Launch Sniper'
   readonly quote = 'weth' as const
   private readonly p: LaunchSniperParams
-  private readonly queue: Candidate[] = []
-  private readonly seen = new Set<string>()
-  private unwatch: (() => void) | null = null
+  private readonly queue: EventQueue
 
-  constructor(params: Partial<LaunchSniperParams> = {}) {
+  /**
+   * `queue` is the durable discovery queue — see {@link
+   * ../discovery/event-queue.js}. In production wiring (main.ts) this is a
+   * disk-backed queue shared with a {@link
+   * ../discovery/launch-detector.js!LaunchDetector} that owns the actual
+   * chain subscription; this strategy only ever claims already-persisted,
+   * confirmation-safe events, so a dropped in-process array can no longer
+   * lose a candidate on a crash/restart. Defaults to an in-memory queue so
+   * existing standalone construction (tests, `new LaunchSniper()`) keeps
+   * working without requiring every caller to wire discovery.
+   */
+  constructor(params: Partial<LaunchSniperParams> = {}, queue: EventQueue = new EventQueue(':memory:')) {
     this.p = { ...DEFAULTS, ...params }
+    this.queue = queue
   }
 
   get meta(): StrategyMeta {
@@ -86,26 +88,6 @@ export class LaunchSniper implements Strategy {
       ],
       params: { ...this.p },
     }
-  }
-
-  start(ctx: StrategyStartContext): void {
-    // Real-time launch subscription across NOXA + The Odyssey.
-    this.unwatch = watchLaunches(
-      ctx.market.client,
-      (launch) => {
-        const key = launch.token.toLowerCase()
-        if (this.seen.has(key)) return
-        this.seen.add(key)
-        this.queue.push({ launch, seenAt: Date.now() })
-        ctx.log(`new launch queued: ${launch.launchpad} ${launch.token}`, { creator: launch.creator })
-      },
-      { onError: (e) => ctx.log(`launch watcher error: ${e.message}`) },
-    )
-  }
-
-  stop(): void {
-    this.unwatch?.()
-    this.unwatch = null
   }
 
   async tick(ctx: StrategyTickContext): Promise<Decision> {
@@ -136,12 +118,28 @@ export class LaunchSniper implements Strategy {
       }
     }
 
-    // ── one new entry per tick (evaluate the oldest queued candidate) ──────────
-    const candidate = this.queue.shift()
-    if (candidate) {
-      const decisionOrReject = await this.evaluate(ctx, candidate)
-      if (decisionOrReject.intent) intents.push(decisionOrReject.intent)
-      else if (decisionOrReject.alert) alerts.push(decisionOrReject.alert)
+    // ── one new entry per tick (claim the oldest queued, confirmation-safe launch) ──
+    const claimed = this.queue.claimNext(LAUNCH_KIND, ctx.now)
+    if (claimed) {
+      try {
+        const launch = decodeLaunchPayload(claimed.payload)
+        const decisionOrReject = await this.evaluate(ctx, launch, claimed.detectedAt)
+        this.queue.markEnriched(claimed.eventId, ctx.now) // safety/liquidity checks above have now run
+        if (decisionOrReject.intent) {
+          intents.push(decisionOrReject.intent)
+          this.queue.markDecisioned(claimed.eventId, ctx.now)
+        } else if (decisionOrReject.alert) {
+          alerts.push(decisionOrReject.alert)
+          this.queue.markRejected(claimed.eventId, decisionOrReject.alert.message)
+        } else {
+          // Already holding this token — not a rejection, just not actionable right now.
+          this.queue.markRejected(claimed.eventId, 'already holding a position in this token')
+        }
+      } catch (err) {
+        // Every claimed event must reach a terminal state — an unexpected
+        // exception here must not strand the row in `processing` forever.
+        this.queue.markError(claimed.eventId, err instanceof Error ? err.message : String(err))
+      }
     }
 
     return { intents, alerts }
@@ -149,10 +147,10 @@ export class LaunchSniper implements Strategy {
 
   private async evaluate(
     ctx: StrategyTickContext,
-    candidate: Candidate,
+    launch: Launch,
+    detectedAt: number,
   ): Promise<{ intent?: Intent; alert?: Alert }> {
-    const { launch } = candidate
-    const ageSec = (ctx.now - candidate.seenAt) / 1000
+    const ageSec = (ctx.now - detectedAt) / 1000
     if (ageSec > this.p.maxLaunchAgeSeconds) {
       return {
         alert: {

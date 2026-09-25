@@ -10,6 +10,8 @@ import type { Position } from '../../src/framework/types.js'
 import type { Market } from '../../src/framework/market.js'
 import type { StrategyTickContext } from '../../src/framework/strategy.js'
 import { FakeMarket } from './helpers/fake-market.js'
+import { EventQueue } from '../../src/discovery/event-queue.js'
+import { LAUNCH_KIND, encodeLaunchPayload } from '../../src/discovery/launch-detector.js'
 
 const snapshot = JSON.parse(
   readFileSync(fileURLToPath(new URL('../snapshots/latest.json', import.meta.url)), 'utf8'),
@@ -94,80 +96,105 @@ describe('LaunchSniper — exits (pure math, no market calls)', () => {
 })
 
 describe('LaunchSniper — entry filters (using a queued candidate + FakeMarket)', () => {
-  function seeded(
-    sniper: LaunchSniper,
-    launch: { token: Address; creator: Address; launchpad: 'noxa' | 'odyssey'; pool: Address | null },
-  ) {
-    // The launch queue is populated by the live watchLaunches() subscription in
-    // start(); tests inject a candidate directly since it is otherwise only
-    // reachable via a real chain WebSocket subscription.
-    ;(sniper as unknown as { queue: { launch: typeof launch; seenAt: number }[] }).queue.push({
-      launch: { ...launch, blockNumber: 1n, transactionHash: '0xdead' as `0x${string}` },
-      seenAt: Date.now(),
+  let seq = 0
+
+  // Seeds a fresh in-memory durable EventQueue exactly the way LaunchDetector
+  // does in production (see discovery/launch-detector.ts), so these tests
+  // exercise the real claim → evaluate → mark-terminal path instead of poking
+  // a private field.
+  function seededQueue(launch: {
+    token: Address
+    creator: Address
+    launchpad: 'noxa' | 'odyssey'
+    pool: Address | null
+  }): EventQueue {
+    const queue = new EventQueue(':memory:')
+    seq += 1
+    queue.recordDetected({
+      chainId: 4663,
+      blockNumber: 1n,
+      transactionHash: `0xdead${seq}` as `0x${string}`,
+      discriminator: launch.token,
+      kind: LAUNCH_KIND,
+      payload: encodeLaunchPayload({
+        ...launch,
+        blockNumber: 1n,
+        transactionHash: `0xdead${seq}` as `0x${string}`,
+      }),
     })
+    const eventId = EventQueue.eventId({
+      chainId: 4663,
+      blockNumber: 1n,
+      transactionHash: `0xdead${seq}`,
+      discriminator: launch.token,
+    })
+    queue.markQueued(eventId)
+    return queue
   }
 
   it('skips a launch with no liquid Uniswap route (e.g. an un-graduated Odyssey curve token)', async () => {
-    const sniper = new LaunchSniper()
     const market = new FakeMarket()
     // no buyRoutes entry for TOKEN_A → quoteBuy resolves null
-    seeded(sniper, { token: TOKEN_A, creator: CREATOR, launchpad: 'odyssey', pool: null })
+    const queue = seededQueue({ token: TOKEN_A, creator: CREATOR, launchpad: 'odyssey', pool: null })
+    const sniper = new LaunchSniper({}, queue)
     const decision = await sniper.tick(ctxFor(market, [], Date.now(), 'weth'))
     expect(decision.intents).toHaveLength(0)
     expect(decision.alerts[0]?.message).toMatch(/no liquid Uniswap route/)
+    expect(queue.stateCounts(LAUNCH_KIND).rejected).toBe(1)
   })
 
   it('skips a honeypot: buy succeeds but sell-back resolves no route', async () => {
-    const sniper = new LaunchSniper()
     const market = new FakeMarket()
     market.buyRoutes.set(TOKEN_A.toLowerCase(), parseEther('1000'))
     // no sellRoutes entry → quoteSell resolves null
-    seeded(sniper, { token: TOKEN_A, creator: CREATOR, launchpad: 'noxa', pool: TOKEN_A })
+    const queue = seededQueue({ token: TOKEN_A, creator: CREATOR, launchpad: 'noxa', pool: TOKEN_A })
+    const sniper = new LaunchSniper({}, queue)
     const decision = await sniper.tick(ctxFor(market, [], Date.now(), 'weth'))
     expect(decision.intents).toHaveLength(0)
     expect(decision.alerts[0]?.message).toMatch(/honeypot/)
   })
 
   it('skips a launch whose round-trip loses more than the configured threshold', async () => {
-    const sniper = new LaunchSniper({ maxRoundTripLossPct: 0.2, entryWeth: 0.01 })
     const market = new FakeMarket()
     const amountIn = parseEther('0.01')
     market.buyRoutes.set(TOKEN_A.toLowerCase(), parseEther('1000'))
     // Sell back only 70% of the input value — a 30% round-trip loss, over the 20% cap.
     market.sellRoutes.set(TOKEN_A.toLowerCase(), (amountIn * 70n) / 100n)
     market.multicallResults = [parseEther('1000000'), 0n] // supply, deployer balance
-    seeded(sniper, { token: TOKEN_A, creator: CREATOR, launchpad: 'noxa', pool: TOKEN_A })
+    const queue = seededQueue({ token: TOKEN_A, creator: CREATOR, launchpad: 'noxa', pool: TOKEN_A })
+    const sniper = new LaunchSniper({ maxRoundTripLossPct: 0.2, entryWeth: 0.01 }, queue)
     const decision = await sniper.tick(ctxFor(market, [], Date.now(), 'weth'))
     expect(decision.intents).toHaveLength(0)
     expect(decision.alerts[0]?.message).toMatch(/round-trip loss/)
   })
 
   it('skips a launch where the deployer holds more than the concentration cap', async () => {
-    const sniper = new LaunchSniper({ maxDeployerPct: 0.1 })
     const market = new FakeMarket()
     const amountIn = parseEther('0.01')
     market.buyRoutes.set(TOKEN_A.toLowerCase(), parseEther('1000'))
     market.sellRoutes.set(TOKEN_A.toLowerCase(), (amountIn * 98n) / 100n) // clean round trip
     // deployer holds 25% of supply — over the 10% cap
     market.multicallResults = [parseEther('1000'), parseEther('250')]
-    seeded(sniper, { token: TOKEN_A, creator: CREATOR, launchpad: 'noxa', pool: TOKEN_A })
+    const queue = seededQueue({ token: TOKEN_A, creator: CREATOR, launchpad: 'noxa', pool: TOKEN_A })
+    const sniper = new LaunchSniper({ maxDeployerPct: 0.1 }, queue)
     const decision = await sniper.tick(ctxFor(market, [], Date.now(), 'weth'))
     expect(decision.intents).toHaveLength(0)
     expect(decision.alerts[0]?.message).toMatch(/deployer holds/)
   })
 
   it('enters when every filter clears', async () => {
-    const sniper = new LaunchSniper({ maxDeployerPct: 0.5, maxRoundTripLossPct: 0.5, entryWeth: 0.01 })
     const market = new FakeMarket()
     const amountIn = parseEther('0.01')
     market.buyRoutes.set(TOKEN_A.toLowerCase(), parseEther('1000'))
     market.sellRoutes.set(TOKEN_A.toLowerCase(), (amountIn * 98n) / 100n)
     market.multicallResults = [parseEther('1000'), parseEther('10')] // deployer holds 1%
-    seeded(sniper, { token: TOKEN_A, creator: CREATOR, launchpad: 'noxa', pool: TOKEN_A })
+    const queue = seededQueue({ token: TOKEN_A, creator: CREATOR, launchpad: 'noxa', pool: TOKEN_A })
+    const sniper = new LaunchSniper({ maxDeployerPct: 0.5, maxRoundTripLossPct: 0.5, entryWeth: 0.01 }, queue)
     const decision = await sniper.tick(ctxFor(market, [], Date.now(), 'weth'))
     expect(decision.intents).toHaveLength(1)
     expect(decision.intents[0]?.side).toBe('buy')
     expect(decision.intents[0]?.amountIn).toBe(amountIn)
+    expect(queue.stateCounts(LAUNCH_KIND).decisioned).toBe(1)
   })
 
   it('reports its edge hypothesis and failure modes (documentation contract)', () => {
