@@ -8,6 +8,7 @@ import { Market } from './market.js'
 import { utcDayStart } from './risk.js'
 import type { Strategy } from './strategy.js'
 import type { AgentStatus, Mode, RiskLimits } from './types.js'
+import type { Executor } from '../execution/executor.js'
 
 /** Definition of one agent within a fleet. */
 export interface AgentSpec {
@@ -16,6 +17,8 @@ export interface AgentSpec {
   /** Overrides merged over the fleet default limits. */
   limits?: Partial<RiskLimits>
   tickIntervalMs?: number
+  /** Level 6 execution engine — see agent.ts's AgentOptions.executor doc comment. */
+  executor?: Executor
 }
 
 /** Aggregate fleet numbers for the dashboard header. */
@@ -76,6 +79,7 @@ export class Fleet {
           fleetSpentTodayUsd: () => this.currentFleetSpend(),
           reportFleetSpend: (usd) => this.recordFleetSpend(usd),
           tickIntervalMs: spec.tickIntervalMs ?? 5000,
+          executor: spec.executor,
         }),
       )
     }

@@ -6,6 +6,7 @@ import { RiskEngine, utcDayStart } from './risk.js'
 import type { KillSwitch } from './kill.js'
 import type { Strategy } from './strategy.js'
 import type { AgentStatus, Decision, Intent, Mode, Position, RiskLimits, TradeRecord } from './types.js'
+import type { Executor } from '../execution/executor.js'
 
 /** Everything an {@link Agent} is constructed with. */
 export interface AgentOptions {
@@ -26,9 +27,25 @@ export interface AgentOptions {
   tickIntervalMs: number
   /** Injected clock, for tests. Defaults to `Date.now`. */
   clock?: () => number
+  /**
+   * Level 6 execution engine (order lifecycle + nonce management + fill
+   * reconciliation — see src/execution/executor.ts). Optional and additive:
+   * when absent, live mode falls back to the simple inline sign-and-submit
+   * this class always had. main.ts wires a real one; unit tests (and any
+   * mode !== 'live' run) never need to.
+   */
+  executor?: Executor
 }
 
 const DUST = 1_000n // token smallest-units below which a position is considered closed
+
+interface LiveExecutionResult {
+  hash: Hash
+  /** Quoted floor (post-slippage) — always populated, the pre-Level-6 fallback figure. */
+  amountOutMinimum: bigint
+  /** Real reconciled fill (Level 6, Executor path only) — null on the plain inline-executeLive path. */
+  actualAmountOut: bigint | null
+}
 
 /**
  * An autonomous trading agent = strategy + wallet + risk budget + journal.
@@ -259,13 +276,17 @@ export class Agent {
     let txHash: Hash | null = null
     let amountOut = sim.amountOut
     if (this.mode === 'live') {
-      const executed = await this.executeLive(intent, sim, slippageBps)
+      const executed = this.opts.executor
+        ? await this.executeLiveViaExecutor(this.opts.executor, intent, sim, slippageBps, now)
+        : await this.executeLive(intent, sim, slippageBps)
       if (!executed) {
         refuse('no_route', 'live execution failed (see logs)')
         return
       }
       txHash = executed.hash
-      amountOut = executed.amountOutMinimum // conservative floor actually received ≥ this
+      // Real reconciled fill (Level 6) when available; otherwise the
+      // conservative quoted floor (amountOutMinimum), as before.
+      amountOut = executed.actualAmountOut ?? executed.amountOutMinimum
     }
 
     // ── journal + book-keeping ──────────────────────────────────────────────────
@@ -296,11 +317,53 @@ export class Agent {
     }
   }
 
+  /**
+   * Level 6 path (an {@link Executor} was supplied): full lifecycle tracking,
+   * nonce management, and real fill reconciliation (see
+   * src/execution/executor.ts). Idempotency key comes from the intent's own
+   * `meta.idempotencyKey` when the strategy set one (LaunchSniper passes its
+   * discovery event ID — see launch-sniper.ts) — the strongest guarantee,
+   * tying the order directly to the signal that caused it. Strategies
+   * without a natural per-signal ID fall back to a key unique to this
+   * specific tick's processing attempt, which still prevents an exact
+   * double-submission of the same intent without claiming a stronger
+   * signal-level guarantee it can't actually make.
+   */
+  private async executeLiveViaExecutor(
+    executor: Executor,
+    intent: Intent,
+    sim: SwapQuote,
+    slippageBps: number,
+    now: number,
+  ): Promise<LiveExecutionResult | null> {
+    const idempotencyKey =
+      (intent.meta?.idempotencyKey as string | undefined) ??
+      `${this.id}:${intent.token}:${intent.side}:${now}`
+    const order = await executor.execute({
+      idempotencyKey,
+      agentId: this.id,
+      token: intent.token,
+      quoteToken: intent.quoteToken,
+      side: intent.side,
+      amountIn: intent.amountIn,
+      quote: sim,
+      slippageBps,
+    })
+    if (
+      !order.txHash ||
+      (order.state !== 'RECONCILED' && order.state !== 'CONFIRMED' && order.state !== 'MINED')
+    ) {
+      return null // FAILED, or still genuinely in flight for a duplicate signal — see Executor's doc comment
+    }
+    const minOut = (sim.amountOut * BigInt(10_000 - slippageBps)) / 10_000n
+    return { hash: order.txHash as Hash, amountOutMinimum: minOut, actualAmountOut: order.actualAmountOut }
+  }
+
   private async executeLive(
     intent: Intent,
     sim: SwapQuote,
     slippageBps: number,
-  ): Promise<{ hash: Hash; amountOutMinimum: bigint } | null> {
+  ): Promise<LiveExecutionResult | null> {
     if (!this.account) return null
     try {
       const tx = buildSwapTx(this.market.client, sim, { slippageBps })
@@ -317,7 +380,7 @@ export class Agent {
         chain: this.market.client.chain,
       })
       await this.market.client.public.waitForTransactionReceipt({ hash })
-      return { hash, amountOutMinimum: tx.amountOutMinimum }
+      return { hash, amountOutMinimum: tx.amountOutMinimum, actualAmountOut: null }
     } catch (err) {
       this.lastError = err instanceof Error ? err.message : String(err)
       return null

@@ -126,6 +126,10 @@ export class LaunchSniper implements Strategy {
         const decisionOrReject = await this.evaluate(ctx, launch, claimed.detectedAt)
         this.queue.markEnriched(claimed.eventId, ctx.now) // safety/liquidity checks above have now run
         if (decisionOrReject.intent) {
+          // Ties the order directly to the discovery event that caused it —
+          // see Agent.executeLiveViaExecutor's doc comment (Level 6): this is
+          // the strong form of order_idempotency_key, not the per-tick fallback.
+          decisionOrReject.intent.meta = { ...decisionOrReject.intent.meta, idempotencyKey: claimed.eventId }
           intents.push(decisionOrReject.intent)
           this.queue.markDecisioned(claimed.eventId, ctx.now)
         } else if (decisionOrReject.alert) {

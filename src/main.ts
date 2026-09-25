@@ -14,6 +14,9 @@ import { WalletStore } from './intelligence/wallet-store.js'
 import { WalletTracker, dexAddressesForToken } from './intelligence/wallet-tracker.js'
 import { resolveFunder } from './intelligence/funding-graph.js'
 import { EntityCluster } from './intelligence/entity-cluster.js'
+import { OrderStore } from './execution/order-store.js'
+import { NonceManager } from './execution/nonce-manager.js'
+import { Executor, recoverPendingOrders } from './execution/executor.js'
 import {
   MAINNET_ADDRESSES,
   TESTNET_ADDRESSES,
@@ -113,11 +116,37 @@ async function main(): Promise<void> {
   rpc.start()
   await launchDetector.start()
 
+  // ── Level 6: execution engine (live mode only — paper mode never touches this) ──
+  const orderDbPath = config.dbPath === ':memory:' ? ':memory:' : join(dirname(config.dbPath), 'orders.db')
+  const orderStore = new OrderStore(orderDbPath)
+  let executor: Executor | undefined
+  if (config.mode === 'live' && fleet.market.client.account) {
+    const account = fleet.market.client.account
+    const nonceManager = new NonceManager(fleet.market.client, account.address)
+    await nonceManager.sync()
+    executor = new Executor({
+      client: fleet.market.client,
+      account,
+      orderStore,
+      nonceManager,
+      onError: (e) => console.warn(`executor: ${e.message}`),
+    })
+
+    const recovery = await recoverPendingOrders(fleet.market.client, orderStore, () => ({
+      account: account.address,
+    }))
+    if (recovery.recovered || recovery.failed || recovery.stillPending) {
+      console.log(
+        `order recovery: ${recovery.recovered} reconciled, ${recovery.failed} failed, ${recovery.stillPending} still pending from a prior run`,
+      )
+    }
+  }
+
   const agentIds = ['sniper-1', 'momentum-1', 'premium-1']
   fleet.addAgents([
-    { id: 'sniper-1', strategy: new LaunchSniper({}, discoveryQueue), tickIntervalMs: 4000 },
-    { id: 'momentum-1', strategy: new Momentum(), tickIntervalMs: 15000 },
-    { id: 'premium-1', strategy: new PremiumWatch(), tickIntervalMs: 30000 },
+    { id: 'sniper-1', strategy: new LaunchSniper({}, discoveryQueue), tickIntervalMs: 4000, executor },
+    { id: 'momentum-1', strategy: new Momentum(), tickIntervalMs: 15000, executor },
+    { id: 'premium-1', strategy: new PremiumWatch(), tickIntervalMs: 30000, executor },
   ])
 
   const llm = loadLlmConfig()
@@ -171,6 +200,7 @@ async function main(): Promise<void> {
     rpc.stop()
     discoveryQueue.close()
     walletStore.close()
+    orderStore.close()
     server.close()
     fleet.close()
     process.exit(0)
