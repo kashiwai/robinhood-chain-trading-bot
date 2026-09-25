@@ -4,8 +4,11 @@
 #   cd hood-traders && docker compose up --build
 #
 # Dashboard: http://localhost:4670
-# To go live: copy .env.example to .env, set HOOD_TRADERS_LIVE=1 and
-# ROBINHOOD_CHAIN_PRIVATE_KEY, then `docker compose --env-file .env up --build`.
+# To go live: copy .env.example to .env, set HOOD_TRADERS_LIVE=1,
+# ROBINHOOD_CHAIN_PRIVATE_KEY, and LIVE_ACKNOWLEDGED=YES, then
+# `docker compose --env-file .env up --build`. The in-process Launch Gate
+# (src/main.ts) still refuses to start live trading unless the shadow/paper/
+# probe phases have real accumulated evidence — see docs/LIVE_TRADING.md.
 
 services:
   hood-traders:
@@ -20,9 +23,14 @@ services:
       HOOD_STOCK_TOKEN_ELIGIBLE: ${HOOD_STOCK_TOKEN_ELIGIBLE:-false}
       FLEET_MAX_DAILY_SPEND_USDG: ${FLEET_MAX_DAILY_SPEND_USDG:-250}
       DASHBOARD_PORT: '4670'
+      # Bare-metal default is loopback-only (127.0.0.1) — inside Docker the
+      # dashboard must bind ALL interfaces or `ports: 4670:4670` can never
+      # reach it. The container boundary is the security boundary here.
+      DASHBOARD_HOST: '0.0.0.0'
       KILL_FILE: /app/data/KILL
       HOOD_TRADERS_DB: /app/data/hood-traders.db
       ROBINHOOD_CHAIN_PRIVATE_KEY: ${ROBINHOOD_CHAIN_PRIVATE_KEY:-}
+      LIVE_ACKNOWLEDGED: ${LIVE_ACKNOWLEDGED:-}
       HOOD_RPC_URL: ${HOOD_RPC_URL:-}
     volumes:
       - hood-traders-data:/app/data

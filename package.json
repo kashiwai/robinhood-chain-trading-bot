@@ -57,6 +57,8 @@
     "snapshot": "tsx scripts/capture-snapshot.ts",
     "testnet-trade": "tsx scripts/testnet-trade.ts",
     "capture-session": "node scripts/capture-session.mjs",
+    "check-launch-gate": "node scripts/check-launch-gate.mjs",
+    "check-production-checklist": "node scripts/check-production-checklist.mjs",
     "lint": "eslint src tests scripts",
     "lint:fix": "eslint src tests scripts --fix",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/**/*.{ts,mjs}\"",
