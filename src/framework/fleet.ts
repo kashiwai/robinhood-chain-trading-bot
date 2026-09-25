@@ -9,6 +9,9 @@ import { utcDayStart } from './risk.js'
 import type { Strategy } from './strategy.js'
 import type { AgentStatus, Mode, RiskLimits } from './types.js'
 import type { Executor } from '../execution/executor.js'
+import type { CircuitBreaker } from '../risk/circuit-breaker.js'
+import { DEFAULT_RISK_PROFILE, type AccountRiskProfile } from '../risk/risk-profile.js'
+import type { AccountRiskContext } from '../risk/account-risk.js'
 
 /** Definition of one agent within a fleet. */
 export interface AgentSpec {
@@ -19,6 +22,8 @@ export interface AgentSpec {
   tickIntervalMs?: number
   /** Level 6 execution engine — see agent.ts's AgentOptions.executor doc comment. */
   executor?: Executor
+  /** Level 7 circuit breaker — see agent.ts's AgentOptions.circuitBreaker doc comment. */
+  circuitBreaker?: CircuitBreaker
 }
 
 /** Aggregate fleet numbers for the dashboard header. */
@@ -53,8 +58,18 @@ export class Fleet {
   private spentDay = 0
   private startedAt = 0
 
-  constructor(config: FleetConfig) {
+  // ── Level 7: account-wide risk tracking (see risk/account-risk.ts) ─────────
+  readonly riskProfile: AccountRiskProfile
+  private cumulativeRealizedPnlUsd = 0
+  private consecutiveLosses = 0
+  private dailyRealizedPnlUsd = 0
+  private dailyPnlDay = 0
+  private equityPeakAllTime = 0
+  private equityHistory7d: { ts: number; equity: number }[] = []
+
+  constructor(config: FleetConfig, riskProfile: AccountRiskProfile = DEFAULT_RISK_PROFILE) {
     this.config = config
+    this.riskProfile = riskProfile
     this.account = config.privateKey ? privateKeyToAccount(config.privateKey) : null
     this.journal = new Journal(config.dbPath)
     this.kill = new KillSwitch(config.killFile)
@@ -80,6 +95,12 @@ export class Fleet {
           reportFleetSpend: (usd) => this.recordFleetSpend(usd),
           tickIntervalMs: spec.tickIntervalMs ?? 5000,
           executor: spec.executor,
+          circuitBreaker: spec.circuitBreaker,
+          accountRisk: {
+            profile: this.riskProfile,
+            contextProvider: (candidateUsd) => this.accountRiskContext(candidateUsd),
+          },
+          reportTradeResult: (pnlUsd) => this.recordTradeResult(pnlUsd),
         }),
       )
     }
@@ -97,6 +118,51 @@ export class Fleet {
   private recordFleetSpend(usd: number): void {
     this.currentFleetSpend()
     this.fleetSpentTodayUsd += usd
+  }
+
+  /**
+   * Called by every agent after a sell closes (realized PnL delta, positive
+   * or negative). Feeds the $1,000 profile's daily-loss, drawdown, and
+   * consecutive-loss ceilings — see risk/account-risk.ts. Drawdown is
+   * measured against `riskProfile.accountLimitUsd` (the starting capital),
+   * not against the peak itself, so it reads as "% of your account", matching
+   * how the spec phrases MAX_7D_DRAWDOWN_PCT/MAX_TOTAL_DRAWDOWN_PCT.
+   */
+  private recordTradeResult(pnlUsd: number, now = Date.now()): void {
+    this.cumulativeRealizedPnlUsd += pnlUsd
+    if (pnlUsd < 0) this.consecutiveLosses += 1
+    else if (pnlUsd > 0) this.consecutiveLosses = 0
+
+    const day = utcDayStart(now)
+    if (day !== this.dailyPnlDay) {
+      this.dailyPnlDay = day
+      this.dailyRealizedPnlUsd = 0
+    }
+    this.dailyRealizedPnlUsd += pnlUsd
+
+    this.equityPeakAllTime = Math.max(this.equityPeakAllTime, this.cumulativeRealizedPnlUsd)
+    this.equityHistory7d.push({ ts: now, equity: this.cumulativeRealizedPnlUsd })
+    const cutoff = now - 7 * 24 * 60 * 60 * 1000
+    this.equityHistory7d = this.equityHistory7d.filter((e) => e.ts >= cutoff)
+  }
+
+  private accountRiskContext(candidatePositionUsd: number): AccountRiskContext {
+    const statuses = this.agentStatuses()
+    const peak7d =
+      this.equityHistory7d.length > 0
+        ? Math.max(...this.equityHistory7d.map((e) => e.equity))
+        : this.cumulativeRealizedPnlUsd
+    const accountLimitUsd = this.riskProfile.accountLimitUsd || 1
+    return {
+      openPositionsCount: statuses.reduce((s, a) => s + a.positions.length, 0),
+      totalExposureUsd: statuses.reduce((s, a) => s + a.openValueUsd, 0),
+      candidatePositionUsd,
+      dailyRealizedLossUsd: Math.max(0, -this.dailyRealizedPnlUsd),
+      drawdown7dPct: (Math.max(0, peak7d - this.cumulativeRealizedPnlUsd) / accountLimitUsd) * 100,
+      totalDrawdownPct:
+        (Math.max(0, this.equityPeakAllTime - this.cumulativeRealizedPnlUsd) / accountLimitUsd) * 100,
+      consecutiveLosses: this.consecutiveLosses,
+    }
   }
 
   /** Arm the kill switch and start every agent's loop. */

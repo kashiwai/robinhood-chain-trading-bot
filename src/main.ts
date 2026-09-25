@@ -17,6 +17,8 @@ import { EntityCluster } from './intelligence/entity-cluster.js'
 import { OrderStore } from './execution/order-store.js'
 import { NonceManager } from './execution/nonce-manager.js'
 import { Executor, recoverPendingOrders } from './execution/executor.js'
+import { CircuitBreaker } from './risk/circuit-breaker.js'
+import { loadRiskProfile } from './risk/risk-profile.js'
 import {
   MAINNET_ADDRESSES,
   TESTNET_ADDRESSES,
@@ -33,7 +35,19 @@ const DASHBOARD_STATIC_ROOT = join(fileURLToPath(new URL('.', import.meta.url)),
 
 async function main(): Promise<void> {
   const config = loadFleetConfig()
-  const fleet = new Fleet(config)
+  const riskProfile = loadRiskProfile()
+  const fleet = new Fleet(config, riskProfile)
+
+  // ── Level 7: circuit breaker (buy-paused / sell-enabled). Only the
+  // discovery RPC health condition is auto-wired below for now — the other
+  // eight named conditions (database_error, sell_failure, daily_loss_
+  // exceeded, drawdown_exceeded, consecutive_losses, price_oracle_
+  // disagreement, nonce_failure, reconciliation_mismatch) are fully built
+  // and tested (risk/circuit-breaker.ts) but not yet wired to an automatic
+  // trigger elsewhere in this codebase — `circuitBreaker.trip(...)` is
+  // there for a future level (or the dashboard) to call. Not claiming more
+  // automatic coverage than actually exists.
+  const circuitBreaker = new CircuitBreaker()
 
   // ── discovery: durable event queue + RPC-redundant launch watcher ──────────
   // Independent of `fleet.market` (the execution/quoting client) — see
@@ -116,6 +130,19 @@ async function main(): Promise<void> {
   rpc.start()
   await launchDetector.start()
 
+  // Real wiring for the 'rpc_unhealthy' breaker: every endpoint the discovery
+  // RpcManager knows about reporting unhealthy at once trips it; the active
+  // endpoint reporting healthy again clears it. Runs on the same cadence as
+  // RpcManager's own health checks.
+  setInterval(() => {
+    const snapshot = rpc.healthSnapshot()
+    if (snapshot.length > 0 && snapshot.every((h) => !h.healthy)) {
+      circuitBreaker.trip('rpc_unhealthy', `all ${snapshot.length} discovery RPC endpoint(s) unhealthy`)
+    } else if (snapshot.some((h) => h.healthy)) {
+      circuitBreaker.clear('rpc_unhealthy')
+    }
+  }, 15_000).unref?.()
+
   // ── Level 6: execution engine (live mode only — paper mode never touches this) ──
   const orderDbPath = config.dbPath === ':memory:' ? ':memory:' : join(dirname(config.dbPath), 'orders.db')
   const orderStore = new OrderStore(orderDbPath)
@@ -144,9 +171,15 @@ async function main(): Promise<void> {
 
   const agentIds = ['sniper-1', 'momentum-1', 'premium-1']
   fleet.addAgents([
-    { id: 'sniper-1', strategy: new LaunchSniper({}, discoveryQueue), tickIntervalMs: 4000, executor },
-    { id: 'momentum-1', strategy: new Momentum(), tickIntervalMs: 15000, executor },
-    { id: 'premium-1', strategy: new PremiumWatch(), tickIntervalMs: 30000, executor },
+    {
+      id: 'sniper-1',
+      strategy: new LaunchSniper({}, discoveryQueue),
+      tickIntervalMs: 4000,
+      executor,
+      circuitBreaker,
+    },
+    { id: 'momentum-1', strategy: new Momentum(), tickIntervalMs: 15000, executor, circuitBreaker },
+    { id: 'premium-1', strategy: new PremiumWatch(), tickIntervalMs: 30000, executor, circuitBreaker },
   ])
 
   const llm = loadLlmConfig()
@@ -156,6 +189,8 @@ async function main(): Promise<void> {
         id: 'llm-1',
         strategy: new LlmStrategist({ llm, minConfidence: loadLlmMinConfidence() }),
         tickIntervalMs: 20000,
+        executor,
+        circuitBreaker,
       },
     ])
     agentIds.push('llm-1')

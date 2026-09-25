@@ -7,6 +7,9 @@ import type { KillSwitch } from './kill.js'
 import type { Strategy } from './strategy.js'
 import type { AgentStatus, Decision, Intent, Mode, Position, RiskLimits, TradeRecord } from './types.js'
 import type { Executor } from '../execution/executor.js'
+import type { CircuitBreaker } from '../risk/circuit-breaker.js'
+import { checkAccountRisk, type AccountRiskContext } from '../risk/account-risk.js'
+import type { AccountRiskProfile } from '../risk/risk-profile.js'
 
 /** Everything an {@link Agent} is constructed with. */
 export interface AgentOptions {
@@ -35,6 +38,15 @@ export interface AgentOptions {
    * mode !== 'live' run) never need to.
    */
   executor?: Executor
+  /** Level 7: the spec's nine named breakers. When tripped, refuses every BUY (never sells) — see risk/circuit-breaker.ts. */
+  circuitBreaker?: CircuitBreaker
+  /** Level 7: the $1,000 account-wide risk profile, checked before every buy (see risk/account-risk.ts). Fleet supplies a live context snapshot per candidate. */
+  accountRisk?: {
+    profile: AccountRiskProfile
+    contextProvider: (candidatePositionUsd: number) => AccountRiskContext
+  }
+  /** Reports a sell's realized PnL delta (+/-) back to the fleet, feeding its daily-loss/drawdown/consecutive-loss tracking. */
+  reportTradeResult?: (pnlUsd: number) => void
 }
 
 const DUST = 1_000n // token smallest-units below which a position is considered closed
@@ -272,6 +284,32 @@ export class Agent {
       return
     }
 
+    // ── Level 7: circuit breaker + account-wide risk (buys only — sells always pass, same principle as above) ──
+    if (intent.side === 'buy') {
+      if (this.opts.circuitBreaker?.buyPaused()) {
+        const conditions = this.opts.circuitBreaker
+          .activeConditions()
+          .map((c) => c.condition)
+          .join(', ')
+        refuse('circuit_breaker', `BUY paused — active breaker(s): ${conditions}`, {
+          notionalUsd: round(notionalUsd),
+        })
+        return
+      }
+      if (this.opts.accountRisk) {
+        const accountVerdict = checkAccountRisk(
+          this.opts.accountRisk.contextProvider(notionalUsd),
+          this.opts.accountRisk.profile,
+        )
+        if (!accountVerdict.ok) {
+          refuse(accountVerdict.reason ?? 'account_risk', accountVerdict.detail, {
+            notionalUsd: round(notionalUsd),
+          })
+          return
+        }
+      }
+    }
+
     // ── execute ────────────────────────────────────────────────────────────────
     let txHash: Hash | null = null
     let amountOut = sim.amountOut
@@ -310,10 +348,12 @@ export class Agent {
     this.journal.recordTrade(trade)
     this.trades++
     this.lastTradeAt = now
-    this.applyFill(intent, amountOut, notionalUsd, now)
+    const realizedPnlDelta = this.applyFill(intent, amountOut, notionalUsd, now)
     if (intent.side === 'buy') {
       this.spentTodayUsd += notionalUsd
       this.opts.reportFleetSpend(notionalUsd)
+    } else if (realizedPnlDelta !== null) {
+      this.opts.reportTradeResult?.(realizedPnlDelta)
     }
   }
 
@@ -387,7 +427,8 @@ export class Agent {
     }
   }
 
-  private applyFill(intent: Intent, amountOut: bigint, notionalUsd: number, now: number): void {
+  /** Returns the realized PnL delta on a sell (for {@link AgentOptions.reportTradeResult}); null for a buy or a no-op sell. */
+  private applyFill(intent: Intent, amountOut: bigint, notionalUsd: number, now: number): number | null {
     const key = intent.token.toLowerCase()
     const existing = this.positions.get(key)
     if (intent.side === 'buy') {
@@ -409,10 +450,10 @@ export class Agent {
           meta: intent.meta ?? {},
         })
       }
-      return
+      return null
     }
     // sell: realize PnL on the sold fraction
-    if (!existing) return
+    if (!existing) return null
     const sellAmount = intent.amountIn > existing.amount ? existing.amount : intent.amountIn
     // fraction as a float only touches investedUsd (already a float, USD-scale — safe);
     // costBasis stays bigint-only arithmetic so large token-unit positions (amounts near
@@ -421,11 +462,13 @@ export class Agent {
     const costFractionUsd = existing.investedUsd * fraction
     const costBasisSold =
       existing.amount > 0n ? (existing.costBasis * sellAmount) / existing.amount : existing.costBasis
-    this.realizedUsd += notionalUsd - costFractionUsd
+    const realizedDelta = notionalUsd - costFractionUsd
+    this.realizedUsd += realizedDelta
     existing.amount -= sellAmount
     existing.costBasis -= costBasisSold
     existing.investedUsd -= costFractionUsd
     if (existing.amount <= DUST) this.positions.delete(key)
+    return realizedDelta
   }
 
   /** Mark every open position to its live exit value (a real sell-side quote). */
