@@ -132,6 +132,15 @@ export class OrderStore {
     return rows.map(toRow)
   }
 
+  /** Every order ever created, oldest first — used for Level 10 evidence gathering (10-D probe reconciliation counts). */
+  allOrders(): OrderRow[] {
+    const rows = this.db.prepare(`SELECT * FROM orders ORDER BY created_at ASC`).all() as Record<
+      string,
+      unknown
+    >[]
+    return rows.map(toRow)
+  }
+
   transition(key: string, to: OrderState, extra: Partial<OrderRow> = {}, now = Date.now()): void {
     const current = this.get(key)
     if (!current) throw new Error(`order-store: no such order ${key}`)

@@ -115,4 +115,14 @@ describe('Journal', () => {
     journal.recordTrade(trade({ agentId: 'agent-2', ts: 2 }))
     expect(journal.allRecentTrades(10)).toHaveLength(2)
   })
+
+  it('allTradesInMode filters by mode and returns the full (uncapped) history, oldest first', () => {
+    journal = new Journal(':memory:')
+    journal.recordTrade(trade({ mode: 'paper', ts: 2 }))
+    journal.recordTrade(trade({ mode: 'live', ts: 1 }))
+    journal.recordTrade(trade({ mode: 'paper', ts: 3 }))
+    const paperTrades = journal.allTradesInMode('paper')
+    expect(paperTrades.map((t) => t.ts)).toEqual([2, 3])
+    expect(journal.allTradesInMode('live')).toHaveLength(1)
+  })
 })

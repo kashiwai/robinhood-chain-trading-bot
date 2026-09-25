@@ -181,6 +181,15 @@ export class Journal {
     return rows.map(rowToTrade)
   }
 
+  /** Every trade in one mode ('paper' or 'live'), oldest first — the full history, not capped like allRecentTrades. Used by gates/collect-evidence.ts (Level 10's Paper-mode trade count) and analytics/performance.ts callers that want a complete FIFO match. */
+  allTradesInMode(mode: TradeRecord['mode']): TradeRecord[] {
+    const rows = this.db.prepare(`SELECT * FROM trades WHERE mode=? ORDER BY ts ASC`).all(mode) as Record<
+      string,
+      unknown
+    >[]
+    return rows.map(rowToTrade)
+  }
+
   close(): void {
     this.db.close()
   }

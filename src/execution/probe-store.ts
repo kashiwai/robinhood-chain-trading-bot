@@ -84,6 +84,19 @@ export class ProbeStore {
     }
   }
 
+  /** Every probe ever recorded, oldest first — the Level 10 10-D evidence source (see gates/collect-evidence.ts). */
+  allRecords(): ProbeRecord[] {
+    const rows = this.db.prepare(`SELECT * FROM probes ORDER BY ts ASC`).all() as Record<string, unknown>[]
+    return rows.map((row) => ({
+      token: row.token as Address,
+      passed: row.passed === 1,
+      reason: row.reason as string,
+      measuredBuyTaxBps: (row.measured_buy_tax_bps as number | null) ?? null,
+      measuredSellTaxBps: (row.measured_sell_tax_bps as number | null) ?? null,
+      ts: row.ts as number,
+    }))
+  }
+
   close(): void {
     this.db.close()
   }
