@@ -7,6 +7,7 @@ import type { KillSwitch } from './kill.js'
 import type { Strategy } from './strategy.js'
 import type { AgentStatus, Decision, Intent, Mode, Position, RiskLimits, TradeRecord } from './types.js'
 import type { Executor } from '../execution/executor.js'
+import type { ProbeGate } from '../execution/probe-gate.js'
 import type { CircuitBreaker } from '../risk/circuit-breaker.js'
 import { checkAccountRisk, type AccountRiskContext } from '../risk/account-risk.js'
 import type { AccountRiskProfile } from '../risk/risk-profile.js'
@@ -47,6 +48,8 @@ export interface AgentOptions {
   }
   /** Reports a sell's realized PnL delta (+/-) back to the fleet, feeding its daily-loss/drawdown/consecutive-loss tracking. */
   reportTradeResult?: (pnlUsd: number) => void
+  /** Level 10: gates every token's first live buy behind a real $2 probe (see execution/probe-gate.ts). Optional — absent in paper mode and in tests that don't exercise it. */
+  probeGate?: ProbeGate
 }
 
 const DUST = 1_000n // token smallest-units below which a position is considered closed
@@ -303,6 +306,22 @@ export class Agent {
         )
         if (!accountVerdict.ok) {
           refuse(accountVerdict.reason ?? 'account_risk', accountVerdict.detail, {
+            notionalUsd: round(notionalUsd),
+          })
+          return
+        }
+      }
+
+      // ── Level 10: probe gate — a token's first-ever live buy is always a real $2 round trip first ──
+      if (this.mode === 'live' && this.opts.probeGate && !existing) {
+        const gate = await this.opts.probeGate.check(intent.token, {
+          quoteToken,
+          quoteTokenUsdPrice: ethUsd,
+          quoteDecimals,
+          slippageBps,
+        })
+        if (gate.action !== 'already_passed') {
+          refuse(gate.action === 'blacklisted' ? 'probe_blacklisted' : 'probe_ran_this_tick', gate.reason, {
             notionalUsd: round(notionalUsd),
           })
           return

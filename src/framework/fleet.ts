@@ -9,6 +9,7 @@ import { utcDayStart } from './risk.js'
 import type { Strategy } from './strategy.js'
 import type { AgentStatus, Mode, RiskLimits } from './types.js'
 import type { Executor } from '../execution/executor.js'
+import type { ProbeGate } from '../execution/probe-gate.js'
 import type { CircuitBreaker } from '../risk/circuit-breaker.js'
 import { DEFAULT_RISK_PROFILE, type AccountRiskProfile } from '../risk/risk-profile.js'
 import type { AccountRiskContext } from '../risk/account-risk.js'
@@ -24,6 +25,8 @@ export interface AgentSpec {
   executor?: Executor
   /** Level 7 circuit breaker — see agent.ts's AgentOptions.circuitBreaker doc comment. */
   circuitBreaker?: CircuitBreaker
+  /** Level 10 probe gate — see agent.ts's AgentOptions.probeGate doc comment. */
+  probeGate?: ProbeGate
 }
 
 /** Aggregate fleet numbers for the dashboard header. */
@@ -96,6 +99,7 @@ export class Fleet {
           tickIntervalMs: spec.tickIntervalMs ?? 5000,
           executor: spec.executor,
           circuitBreaker: spec.circuitBreaker,
+          probeGate: spec.probeGate,
           accountRisk: {
             profile: this.riskProfile,
             contextProvider: (candidateUsd) => this.accountRiskContext(candidateUsd),
