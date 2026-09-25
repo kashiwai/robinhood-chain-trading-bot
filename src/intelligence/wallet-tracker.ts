@@ -22,6 +22,8 @@ export interface WalletTrackerOptions {
   onError?: (error: Error) => void
   /** Blocks per backfill chunk (public-RPC friendly). @defaultValue 5000n */
   backfillChunkBlocks?: bigint
+  /** Fired the moment a wallet records its first-ever trade — the hook point for Level 4's funding-graph resolution. */
+  onFirstTrade?: (wallet: Address) => void
 }
 
 /**
@@ -160,7 +162,7 @@ export class WalletTracker {
         info.launchDetectedAtMs === null ? null : (now - info.launchDetectedAtMs) / 1000
 
       // RPC read (caller) -> decode (classify, above) -> DB transaction + commit:
-      this.opts.store.recordTrade({
+      const wasNew = this.opts.store.recordTrade({
         token: info.token,
         wallet,
         side: classification,
@@ -174,6 +176,7 @@ export class WalletTracker {
         secondsSinceLaunch,
       })
       // cursor update happens in backfill() after the whole chunk commits (live-watch path has no cursor to advance — see class doc).
+      if (wasNew && this.opts.store.get(wallet)?.totalTrades === 1) this.opts.onFirstTrade?.(wallet)
     } catch (err) {
       this.opts.onError?.(err instanceof Error ? err : new Error(String(err)))
     }

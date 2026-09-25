@@ -12,6 +12,8 @@ import { EventQueue } from './discovery/event-queue.js'
 import { LaunchDetector } from './discovery/launch-detector.js'
 import { WalletStore } from './intelligence/wallet-store.js'
 import { WalletTracker, dexAddressesForToken } from './intelligence/wallet-tracker.js'
+import { resolveFunder } from './intelligence/funding-graph.js'
+import { EntityCluster } from './intelligence/entity-cluster.js'
 import {
   MAINNET_ADDRESSES,
   TESTNET_ADDRESSES,
@@ -55,12 +57,25 @@ async function main(): Promise<void> {
   // ── wallet intelligence: classify every buy/sell on each discovered launch ─
   const walletDbPath = config.dbPath === ':memory:' ? ':memory:' : join(dirname(config.dbPath), 'wallets.db')
   const walletStore = new WalletStore(walletDbPath)
+  // Level 4: who funded a wallet's first trade — resolved once, on first
+  // sight, and folded into the shared entity graph so "3 wallets bought"
+  // can be told apart from "1 entity bought through 3 wallets" (see
+  // intelligence/entity-cluster.ts).
+  const entityCluster = new EntityCluster()
+  const quoteTokensForFunding = [fleet.market.weth, fleet.market.usdg]
   const walletTracker = new WalletTracker({
     client: rpc.active,
     market: fleet.market,
     store: walletStore,
     chainId,
     onError: (e) => console.warn(`wallet-tracker: ${e.message}`),
+    onFirstTrade: (wallet) => {
+      void resolveFunder(rpc.active, wallet, quoteTokensForFunding)
+        .then((edge) => {
+          if (edge) entityCluster.recordFunding(edge.funder, wallet)
+        })
+        .catch((e: unknown) => console.warn(`funding-graph: ${e instanceof Error ? e.message : String(e)}`))
+    },
   })
   const swapAddrs = swapAddresses(fleet.market.client)
   // testnet has no official Uniswap deployment (see hoodchain's own docs on
