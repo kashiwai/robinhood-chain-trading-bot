@@ -15,7 +15,6 @@ import { formatEther, parseEther } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import {
   createHoodClient,
-  ensureApproval,
   executeSwap,
   quoteSwap,
   TESTNET_ADDRESSES,
@@ -34,7 +33,7 @@ async function main() {
         'This trade needs a testnet-46630 wallet funded via ' +
         'https://faucet.testnet.chain.robinhood.com/ — that faucet requires ' +
         'Cloudflare Turnstile + Google Sign-In in a real browser and cannot be ' +
-        'automated headlessly (same blocker hit by robinhood-chain-sdk\'s own ' +
+        "automated headlessly (same blocker hit by robinhood-chain-sdk's own " +
         'tests/live/testnet-swap.test.ts). Fund a wallet there, export the key, ' +
         'and re-run: npm run testnet-trade',
     )
@@ -48,7 +47,9 @@ async function main() {
   const ethBalance = await hood.public.getBalance({ address: account.address })
   console.log(`ETH balance: ${formatEther(ethBalance)}`)
   if (ethBalance < parseEther('0.001')) {
-    console.error(`Insufficient testnet ETH (need >= 0.001, have ${formatEther(ethBalance)}). Claim the faucet first.`)
+    console.error(
+      `Insufficient testnet ETH (need >= 0.001, have ${formatEther(ethBalance)}). Claim the faucet first.`,
+    )
     process.exit(1)
   }
 
@@ -58,7 +59,9 @@ async function main() {
     tokenOut: TESTNET_STOCK_TOKENS.NFLX,
     amountIn: AMOUNT_IN,
   })
-  console.log(`quote: ${AMOUNT_IN} wei WETH -> ${quote.amountOut} wei NFLX (route: ${quote.route.fees.join('/')}bps)`)
+  console.log(
+    `quote: ${AMOUNT_IN} wei WETH -> ${quote.amountOut} wei NFLX (route: ${quote.route.fees.join('/')}bps)`,
+  )
 
   const wethBalance = await hood.public.readContract({
     address: TESTNET_ADDRESSES.weth,

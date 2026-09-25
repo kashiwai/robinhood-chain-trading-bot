@@ -90,7 +90,9 @@ export function loadLlmConfig(env: NodeJS.ProcessEnv = process.env): LlmClientCo
     )
   }
   if (!LLM_PROVIDERS.includes(provider as LlmProvider)) {
-    throw new Error(`hood-traders config.ts: HOOD_LLM_PROVIDER="${provider}" is not one of ${LLM_PROVIDERS.join(', ')}`)
+    throw new Error(
+      `hood-traders config.ts: HOOD_LLM_PROVIDER="${provider}" is not one of ${LLM_PROVIDERS.join(', ')}`,
+    )
   }
   return {
     provider: provider as LlmProvider,
@@ -101,6 +103,6 @@ export function loadLlmConfig(env: NodeJS.ProcessEnv = process.env): LlmClientCo
 }
 
 /** Minimum LLM confidence required to convert a `buy` verdict into a trade. */
-export function loadLlmMinConfidence(env: NodeJS.ProcessEnv = process.env): number {
+export function loadLlmMinConfidence(_env: NodeJS.ProcessEnv = process.env): number {
   return num('HOOD_LLM_MIN_CONFIDENCE', 0.6)
 }

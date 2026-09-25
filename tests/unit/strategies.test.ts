@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import type { Address } from 'viem'
-import { parseEther, parseUnits } from 'viem'
+import { parseEther } from 'viem'
 import { LaunchSniper } from '../../src/strategies/launch-sniper.js'
 import { Momentum } from '../../src/strategies/momentum.js'
 import { PremiumWatch } from '../../src/strategies/premium-watch.js'
@@ -24,7 +24,12 @@ const CREATOR = '0x3333333333333333333333333333333333333c' as Address
 const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168' as Address
 const WETH = '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73' as Address
 
-function ctxFor(market: FakeMarket, positions: Position[], now: number, quote: 'usdg' | 'weth'): StrategyTickContext {
+function ctxFor(
+  market: FakeMarket,
+  positions: Position[],
+  now: number,
+  quote: 'usdg' | 'weth',
+): StrategyTickContext {
   return {
     market: market as unknown as Market,
     positions,
@@ -89,7 +94,10 @@ describe('LaunchSniper — exits (pure math, no market calls)', () => {
 })
 
 describe('LaunchSniper — entry filters (using a queued candidate + FakeMarket)', () => {
-  function seeded(sniper: LaunchSniper, launch: { token: Address; creator: Address; launchpad: 'noxa' | 'odyssey'; pool: Address | null }) {
+  function seeded(
+    sniper: LaunchSniper,
+    launch: { token: Address; creator: Address; launchpad: 'noxa' | 'odyssey'; pool: Address | null },
+  ) {
     // The launch queue is populated by the live watchLaunches() subscription in
     // start(); tests inject a candidate directly since it is otherwise only
     // reachable via a real chain WebSocket subscription.
@@ -170,7 +178,13 @@ describe('LaunchSniper — entry filters (using a queued candidate + FakeMarket)
 })
 
 describe('Momentum — breakout entries and trailing-stop exits', () => {
-  function seededHistory(momentum: Momentum, token: Address, symbol: string, samples: { ts: number; priceUsd: number }[], now: number) {
+  function seededHistory(
+    momentum: Momentum,
+    token: Address,
+    symbol: string,
+    samples: { ts: number; priceUsd: number }[],
+    now: number,
+  ) {
     const internal = momentum as unknown as {
       history: Map<string, { token: Address; symbol: string; samples: typeof samples }>
       lastDiscoveryAt: number
@@ -239,7 +253,10 @@ describe('Momentum — breakout entries and trailing-stop exits', () => {
       openedAt: 0,
     })
     // Seed a peak above current spot, then quote a price 25% below it (over the 20% stop).
-    ;(momentum as unknown as { peakSinceEntry: Map<string, number> }).peakSinceEntry.set(TOKEN_A.toLowerCase(), 100)
+    ;(momentum as unknown as { peakSinceEntry: Map<string, number> }).peakSinceEntry.set(
+      TOKEN_A.toLowerCase(),
+      100,
+    )
     market.spotPrices.set(TOKEN_A.toLowerCase(), 74) // 26% off the peak of 100
     const decision = await momentum.tick(ctxFor(market, [pos], now, 'usdg'))
     expect(decision.intents.some((i) => i.side === 'sell' && /trailing stop/.test(i.reason))).toBe(true)
@@ -254,7 +271,12 @@ describe('Momentum — breakout entries and trailing-stop exits', () => {
 
 describe('PremiumWatch — alerts-only by default, eligibility-gated trading', () => {
   it('alerts on a spread that clears the threshold but does NOT trade when enableTrading is false (default)', async () => {
-    const watch = new PremiumWatch({ symbols: ['AAPL'], alertThresholdBps: 50, tradeThresholdBps: 150, enableTrading: false })
+    const watch = new PremiumWatch({
+      symbols: ['AAPL'],
+      alertThresholdBps: 50,
+      tradeThresholdBps: 150,
+      enableTrading: false,
+    })
     const market = new FakeMarket()
     const oracleUsd = AAPL.priceUsd
     market.chainlinkPrices.set('AAPL', {
@@ -276,7 +298,12 @@ describe('PremiumWatch — alerts-only by default, eligibility-gated trading', (
   })
 
   it('trades the convergence only when BOTH enableTrading=true AND the client acknowledged eligibility', async () => {
-    const watch = new PremiumWatch({ symbols: ['AAPL'], tradeThresholdBps: 150, tradeSizeUsdg: 20, enableTrading: true })
+    const watch = new PremiumWatch({
+      symbols: ['AAPL'],
+      tradeThresholdBps: 150,
+      tradeSizeUsdg: 20,
+      enableTrading: true,
+    })
     const market = new FakeMarket()
     market.client.acknowledgeStockTokenEligibility = true
     const oracleUsd = AAPL.priceUsd
@@ -336,7 +363,13 @@ describe('PremiumWatch — alerts-only by default, eligibility-gated trading', (
       ageSeconds: 0,
     })
     market.dexPrices.set(AAPL.address.toLowerCase(), oracleUsd * 0.9999) // ~1bps spread — converged
-    const pos = position({ token: AAPL.address, tokenSymbol: 'AAPL', quoteToken: USDG, quoteSymbol: 'USDG', openedAt: 0 })
+    const pos = position({
+      token: AAPL.address,
+      tokenSymbol: 'AAPL',
+      quoteToken: USDG,
+      quoteSymbol: 'USDG',
+      openedAt: 0,
+    })
     const decision = await watch.tick(ctxFor(market, [pos], 60_000, 'usdg'))
     expect(decision.intents.some((i) => i.side === 'sell' && /converged/.test(i.reason))).toBe(true)
   })
