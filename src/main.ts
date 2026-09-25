@@ -10,6 +10,16 @@ import { createDashboardServer } from './server/dashboard.js'
 import { RpcManager } from './chain/rpc-manager.js'
 import { EventQueue } from './discovery/event-queue.js'
 import { LaunchDetector } from './discovery/launch-detector.js'
+import { WalletStore } from './intelligence/wallet-store.js'
+import { WalletTracker, dexAddressesForToken } from './intelligence/wallet-tracker.js'
+import {
+  MAINNET_ADDRESSES,
+  TESTNET_ADDRESSES,
+  NOXA_ADDRESSES,
+  ODYSSEY_ADDRESSES,
+  swapAddresses,
+  type Launch,
+} from 'hoodchain'
 
 // main.ts sits at a stable one-level depth in both trees: src/main.ts (tsx,
 // dev) and dist/main.js (tsup bundle, prod) — so "one level up + dashboard"
@@ -41,11 +51,49 @@ async function main(): Promise<void> {
     stockTokenEligible: config.stockTokenEligible,
   })
   const chainId = config.network === 'testnet' ? 46630 : 4663
+
+  // ── wallet intelligence: classify every buy/sell on each discovered launch ─
+  const walletDbPath = config.dbPath === ':memory:' ? ':memory:' : join(dirname(config.dbPath), 'wallets.db')
+  const walletStore = new WalletStore(walletDbPath)
+  const walletTracker = new WalletTracker({
+    client: rpc.active,
+    market: fleet.market,
+    store: walletStore,
+    chainId,
+    onError: (e) => console.warn(`wallet-tracker: ${e.message}`),
+  })
+  const swapAddrs = swapAddresses(fleet.market.client)
+  // testnet has no official Uniswap deployment (see hoodchain's own docs on
+  // TESTNET_ADDRESSES) and so lacks a universalRouter — every other address
+  // here is present on both networks.
+  const universalRouter = config.network === 'mainnet' ? MAINNET_ADDRESSES.universalRouter : undefined
+  const chainAddrs = config.network === 'testnet' ? TESTNET_ADDRESSES : MAINNET_ADDRESSES
+  const sharedDexInfra = [
+    swapAddrs.router,
+    swapAddrs.quoterV2,
+    universalRouter,
+    chainAddrs.nonfungiblePositionManager,
+    NOXA_ADDRESSES.launchFactory,
+    NOXA_ADDRESSES.locker,
+    NOXA_ADDRESSES.feeRouter,
+    ODYSSEY_ADDRESSES.bondingCurveFactory,
+    ODYSSEY_ADDRESSES.instantFactory,
+    ODYSSEY_ADDRESSES.reflectionFactory,
+    ODYSSEY_ADDRESSES.legacyFactory,
+  ].filter((a): a is `0x${string}` => a !== undefined)
+
   const launchDetector = new LaunchDetector({
     rpc,
     queue: discoveryQueue,
     chainId,
     onError: (e) => console.warn(`discovery: ${e.message}`),
+    onLaunch: (launch: Launch) => {
+      void walletTracker.track({
+        token: launch.token,
+        dexAddresses: dexAddressesForToken(launch.pool, sharedDexInfra),
+        launchDetectedAtMs: Date.now(),
+      })
+    },
   })
   rpc.start()
   await launchDetector.start()
@@ -104,8 +152,10 @@ async function main(): Promise<void> {
   const shutdown = () => {
     console.log('\nshutting down — stopping agents, closing journal…')
     launchDetector.stop()
+    walletTracker.stop()
     rpc.stop()
     discoveryQueue.close()
+    walletStore.close()
     server.close()
     fleet.close()
     process.exit(0)
