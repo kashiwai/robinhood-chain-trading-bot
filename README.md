@@ -78,17 +78,26 @@ semver before shipping.
 
 ## Going live
 
-Live mode signs and broadcasts real transactions. It requires **both**:
+Live mode signs and broadcasts real transactions. It requires **all three**:
 
 ```bash
 cp .env.example .env
 # edit .env:
 HOOD_TRADERS_LIVE=1
 ROBINHOOD_CHAIN_PRIVATE_KEY=0x...   # env var only — never hardcode a key
+LIVE_ACKNOWLEDGED=YES               # exact string, case-sensitive — separate, explicit consent
 ```
 
-Missing either one keeps the fleet in paper mode — there is no accidental-live path. Every risk
-cap in `.env.example` applies identically in live mode; they are not paper-mode-only guardrails.
+Missing any one of the three keeps the fleet in paper mode — there is no accidental-live path.
+Every risk cap in `.env.example` applies identically in live mode; they are not paper-mode-only
+guardrails.
+
+**Even with all three set, the process will refuse to start live trading** unless the Level 10
+Launch Gate passes — see [`docs/LIVE_TRADING.md`](docs/LIVE_TRADING.md) for the full sequence
+(shadow run → paper trading → $2 probes → live) and the operational scripts in `scripts/`
+(`start-shadow.sh`, `start-paper.sh`, `start-probe.sh`, `start-live.sh`, `check-launch-gate.mjs`,
+`backup.sh`, `restore.sh`, `kill.sh`). The gate reads real evidence — a real journal, real probe
+records, a real persisted uptime clock — never an operator-typed "yes".
 
 **Stock Token trading** additionally requires `HOOD_STOCK_TOKEN_ELIGIBLE=true` — an explicit
 affirmation that you are not a US/Canada/UK/Switzerland person, per the legal restriction on
