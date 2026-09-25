@@ -35,7 +35,7 @@ async function serveStatic(staticRoot: string, req: IncomingMessage, res: Server
 }
 
 /**
- * The fleet dashboard: a tiny read API over {@link Fleet} plus a `POST /kill`
+ * The fleet dashboard: a tiny read API over {@link Fleet} plus a `POST /api/kill`
  * panic button, serving the static `dashboard/` UI. No framework — this is a
  * small, auditable surface that is also the E2E harness talks to.
  *

@@ -17,8 +17,15 @@ import { EntityCluster } from './intelligence/entity-cluster.js'
 import { OrderStore } from './execution/order-store.js'
 import { NonceManager } from './execution/nonce-manager.js'
 import { Executor, recoverPendingOrders } from './execution/executor.js'
+import { ProbeStore } from './execution/probe-store.js'
+import { ProbeEngine } from './execution/probe.js'
+import { ProbeGate } from './execution/probe-gate.js'
 import { CircuitBreaker } from './risk/circuit-breaker.js'
 import { loadRiskProfile } from './risk/risk-profile.js'
+import { ShadowRunTracker } from './gates/shadow-run.js'
+import { evaluateLaunchGate } from './gates/launch-gate.js'
+import { collectLaunchGateEvidence } from './gates/collect-evidence.js'
+import { readTestGateStatus, readBackupStatus } from './gates/launch-gate-status.js'
 import {
   MAINNET_ADDRESSES,
   TESTNET_ADDRESSES,
@@ -130,23 +137,33 @@ async function main(): Promise<void> {
   rpc.start()
   await launchDetector.start()
 
+  // ── Level 10: shadow-run clock (10-B) — persists across restarts; see gates/shadow-run.ts ──
+  const dataDir = config.dbPath === ':memory:' ? './data' : dirname(config.dbPath)
+  const shadowRun = new ShadowRunTracker(join(dataDir, 'shadow-run.json'))
+
   // Real wiring for the 'rpc_unhealthy' breaker: every endpoint the discovery
   // RpcManager knows about reporting unhealthy at once trips it; the active
   // endpoint reporting healthy again clears it. Runs on the same cadence as
-  // RpcManager's own health checks.
+  // RpcManager's own health checks. The same snapshot also feeds the Level
+  // 10 shadow-run uptime clock (10-B) — one health signal, two consumers.
   setInterval(() => {
     const snapshot = rpc.healthSnapshot()
+    const healthy = snapshot.some((h) => h.healthy)
     if (snapshot.length > 0 && snapshot.every((h) => !h.healthy)) {
       circuitBreaker.trip('rpc_unhealthy', `all ${snapshot.length} discovery RPC endpoint(s) unhealthy`)
-    } else if (snapshot.some((h) => h.healthy)) {
+    } else if (healthy) {
       circuitBreaker.clear('rpc_unhealthy')
     }
+    shadowRun.recordHealthCheck(healthy)
   }, 15_000).unref?.()
 
-  // ── Level 6: execution engine (live mode only — paper mode never touches this) ──
+  // ── Level 6/10: execution engine + probe gate (live mode only — paper mode never touches this) ──
   const orderDbPath = config.dbPath === ':memory:' ? ':memory:' : join(dirname(config.dbPath), 'orders.db')
   const orderStore = new OrderStore(orderDbPath)
+  const probeDbPath = config.dbPath === ':memory:' ? ':memory:' : join(dirname(config.dbPath), 'probes.db')
+  const probeStore = new ProbeStore(probeDbPath)
   let executor: Executor | undefined
+  let probeGate: ProbeGate | undefined
   if (config.mode === 'live' && fleet.market.client.account) {
     const account = fleet.market.client.account
     const nonceManager = new NonceManager(fleet.market.client, account.address)
@@ -167,6 +184,52 @@ async function main(): Promise<void> {
         `order recovery: ${recovery.recovered} reconciled, ${recovery.failed} failed, ${recovery.stillPending} still pending from a prior run`,
       )
     }
+
+    // Level 10 (10-D): every token's FIRST live buy is gated behind a real
+    // $2 probe round trip (see execution/probe-gate.ts) — "新規本注文禁止"
+    // enforced structurally in agent.ts's live-buy path, not by strategy discipline.
+    const probeEngine = new ProbeEngine({
+      executor,
+      market: fleet.market,
+      probeStore,
+      agentId: 'probe',
+    })
+    probeGate = new ProbeGate(probeEngine, probeStore)
+
+    // ── Level 10 (10-F/10-G/10-H): the Live Start Gate — fail-closed, all-or-nothing ──
+    // Evaluated from REAL evidence (journal trades, probe/order records, the
+    // persisted shadow-run clock) — never from an operator-typed "yes". A
+    // gate that isn't ready refuses to let this process go live at all.
+    const testGatePath = join(dataDir, 'launch-gate-status.json')
+    const backupStatusPath = join(dataDir, 'backup-status.json')
+    const testStatus = readTestGateStatus(testGatePath)
+    const backupStatus = readBackupStatus(backupStatusPath)
+    const evidence = collectLaunchGateEvidence({
+      journal: fleet.journal,
+      orderStore,
+      probeStore,
+      shadowRun,
+      levelTestsPass: testStatus?.levelTestsPass ?? false,
+      replayPass: testStatus?.replayPass ?? false,
+      securityScanClean: testStatus?.securityScanClean ?? false,
+      backupLastRunAt: backupStatus?.lastRunAt ?? null,
+      restartRecoveryWired: true, // static fact: recoverPendingOrders is called immediately above, every live boot
+    })
+    const gate = evaluateLaunchGate(evidence)
+    if (!gate.ready) {
+      console.error('\n✗ LAUNCH GATE: NOT READY — refusing to start live trading.\n')
+      for (const blocker of gate.blockers) console.error(`  - ${blocker}`)
+      console.error(
+        '\nRun `npm run check-launch-gate` (scripts/check-launch-gate.mjs) and `scripts/backup.sh` to refresh ' +
+          'the evidence this gate reads, and let the shadow/paper/probe phases accumulate real elapsed time. ' +
+          'This process will exit now rather than sign any live transaction.\n',
+      )
+      process.exit(1)
+    }
+    console.log(
+      `\n✓ LAUNCH GATE: PASS — ${evidence.shadowHoursCompleted.toFixed(1)}h shadow, ` +
+        `${evidence.paperClosedTrades} paper trades, ${evidence.probeReconciledCount}/${evidence.probeCyclesCompleted} probes reconciled.\n`,
+    )
   }
 
   const agentIds = ['sniper-1', 'momentum-1', 'premium-1']
@@ -177,9 +240,24 @@ async function main(): Promise<void> {
       tickIntervalMs: 4000,
       executor,
       circuitBreaker,
+      probeGate,
     },
-    { id: 'momentum-1', strategy: new Momentum(), tickIntervalMs: 15000, executor, circuitBreaker },
-    { id: 'premium-1', strategy: new PremiumWatch(), tickIntervalMs: 30000, executor, circuitBreaker },
+    {
+      id: 'momentum-1',
+      strategy: new Momentum(),
+      tickIntervalMs: 15000,
+      executor,
+      circuitBreaker,
+      probeGate,
+    },
+    {
+      id: 'premium-1',
+      strategy: new PremiumWatch(),
+      tickIntervalMs: 30000,
+      executor,
+      circuitBreaker,
+      probeGate,
+    },
   ])
 
   const llm = loadLlmConfig()
@@ -191,6 +269,7 @@ async function main(): Promise<void> {
         tickIntervalMs: 20000,
         executor,
         circuitBreaker,
+        probeGate,
       },
     ])
     agentIds.push('llm-1')
@@ -208,7 +287,7 @@ async function main(): Promise<void> {
     ` mode      : ${config.mode.toUpperCase()}${config.mode === 'paper' ? ' (simulation only, no real funds move)' : ' (REAL FUNDS — swaps will be signed and broadcast)'}`,
     ` agents    : ${agentIds.join(', ')}`,
     ` fleet cap : $${config.fleetMaxDailySpendUsdg}/day`,
-    ` dashboard : http://localhost:${config.dashboardPort}`,
+    ` dashboard : http://${config.dashboardHost}:${config.dashboardPort}${config.dashboardHost === '0.0.0.0' ? ' (exposed to the network — DASHBOARD_HOST=0.0.0.0)' : ''}`,
     ` kill file : ${config.killFile}`,
     '─'.repeat(60),
   ].join('\n')
@@ -217,15 +296,30 @@ async function main(): Promise<void> {
   if (config.mode === 'live') {
     console.warn(
       '\n⚠ LIVE MODE — this process will sign and broadcast real transactions with real funds.\n' +
-        '  Risk caps are active but are not a guarantee against loss. Ctrl-C or POST /kill to halt.\n',
+        '  Risk caps are active but are not a guarantee against loss. Ctrl-C or POST /api/kill to halt.\n',
+    )
+    const account = fleet.market.client.account
+    console.log(
+      [
+        '═'.repeat(60),
+        ' SYSTEM READY FOR CONTROLLED $1,000 LIVE TEST',
+        '═'.repeat(60),
+        ` live start cmd    : HOOD_TRADERS_LIVE=1 LIVE_ACKNOWLEDGED=YES ROBINHOOD_CHAIN_PRIVATE_KEY=*** npm run fleet`,
+        ` risk limits       : $${riskProfile.accountLimitUsd} account cap, $${riskProfile.maxPositionUsd}/position, ${riskProfile.maxOpenPositions} max open, ${riskProfile.maxDailyLossPct}% daily loss cap`,
+        ` trading wallet    : ${account?.address ?? '(none)'}`,
+        ` rpc health        : ${rpc.healthSnapshot().filter((h) => h.healthy).length}/${rpc.healthSnapshot().length} endpoint(s) healthy`,
+        ` db backup         : ${readBackupStatus(join(dataDir, 'backup-status.json'))?.lastRunAt ? new Date(readBackupStatus(join(dataDir, 'backup-status.json'))!.lastRunAt).toISOString() : 'never run — see scripts/backup.sh'}`,
+        ` kill switch       : file=${config.killFile} (touch this file, or POST /api/kill, to halt immediately)`,
+        '═'.repeat(60),
+      ].join('\n'),
     )
   }
 
   await fleet.start()
 
   const server = createDashboardServer(fleet, DASHBOARD_STATIC_ROOT)
-  server.listen(config.dashboardPort, () => {
-    console.log(`dashboard listening on :${config.dashboardPort}`)
+  server.listen(config.dashboardPort, config.dashboardHost, () => {
+    console.log(`dashboard listening on ${config.dashboardHost}:${config.dashboardPort}`)
   })
 
   const shutdown = () => {
@@ -236,6 +330,7 @@ async function main(): Promise<void> {
     discoveryQueue.close()
     walletStore.close()
     orderStore.close()
+    probeStore.close()
     server.close()
     fleet.close()
     process.exit(0)

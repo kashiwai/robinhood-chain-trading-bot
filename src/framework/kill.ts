@@ -7,7 +7,7 @@ import { existsSync } from 'node:fs'
  *
  *   1. SIGINT / SIGTERM (Ctrl-C, container stop)
  *   2. the presence of a `KILL` file on disk (drop-a-file panic button)
- *   3. an HTTP `POST /kill` on the dashboard server (wired in server/)
+ *   3. an HTTP `POST /api/kill` on the dashboard server (wired in server/)
  *
  * The switch never sells or unwinds on its own — it HALTS new risk. Unwinding is
  * an explicit operator action, because a forced market-sell into thin liquidity
