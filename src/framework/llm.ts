@@ -34,6 +34,43 @@ export interface LlmVerdict {
 }
 
 /**
+ * Level 8's JEV output contract — deliberately NOT {@link LlmVerdict}. The
+ * spec is explicit: "自然言語長文は禁止" (no long-form natural language) and
+ * "Low latency最優先". `reasonCodes` are short machine tokens (e.g.
+ * `"low_liquidity"`, `"clean_contract"`), not a sentence — see
+ * `JEV_REASON_CODES` for the fixed vocabulary this is validated against, so
+ * a downstream consumer can switch on them instead of parsing prose.
+ */
+export type JevDecision = 'BUY' | 'REJECT' | 'WATCH'
+
+export interface JevVerdict {
+  decision: JevDecision
+  /** Clamped to [0, 1]. */
+  confidence: number
+  reasonCodes: string[]
+}
+
+/** Fixed vocabulary `judgeFeatureVector` prompts the model to choose from — keeps reason codes machine-parseable and comparable across calls. */
+export const JEV_REASON_CODES = [
+  'clean_contract',
+  'contract_risk',
+  'deep_liquidity',
+  'shallow_liquidity',
+  'high_sellability',
+  'low_sellability',
+  'smart_money_buying',
+  'no_smart_money',
+  'cluster_coordinated',
+  'independent_buyers',
+  'strong_momentum',
+  'weak_momentum',
+  'buy_pressure',
+  'sell_pressure',
+  'young_token',
+  'stale_token',
+] as const
+
+/**
  * Default model per provider. Anthropic and OpenRouter defaults are stable
  * (a dated snapshot and an auto-router, respectively). OpenAI/Groq model
  * catalogs move faster — `HOOD_LLM_MODEL` overrides any of these; if a default
@@ -65,13 +102,37 @@ const SYSTEM_PROMPT = [
 
 /** Ask the configured LLM to judge a launch brief. Throws on any failure (timeout, HTTP error, malformed verdict). */
 export async function judgeLaunch(cfg: LlmClientConfig, brief: string): Promise<LlmVerdict> {
+  const text = await callWithTimeout(cfg, SYSTEM_PROMPT, brief)
+  return parseVerdict(text)
+}
+
+/**
+ * Level 8's JEV adapter entry point: judges a pre-built, already-numeric
+ * feature vector (see decision/feature-vector.ts) and returns a structured
+ * {@link JevVerdict} — no free-text brief, no thesis. `featureVectorJson`
+ * is the caller's serialized vector (kept as a plain string here so this
+ * module stays decision-schema-agnostic; decision/jev-adapter.ts owns the
+ * schema).
+ */
+export async function judgeFeatureVector(
+  cfg: LlmClientConfig,
+  featureVectorJson: string,
+): Promise<JevVerdict> {
+  const text = await callWithTimeout(cfg, JEV_SYSTEM_PROMPT, featureVectorJson)
+  return parseJevVerdict(text)
+}
+
+async function callWithTimeout(
+  cfg: LlmClientConfig,
+  systemPrompt: string,
+  userContent: string,
+): Promise<string> {
   const model = cfg.model || DEFAULT_MODELS[cfg.provider]
   const timeoutMs = cfg.timeoutMs ?? 9000
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    const text = await callProvider(cfg.provider, cfg.apiKey, model, brief, controller.signal)
-    return parseVerdict(text)
+    return await callProvider(cfg.provider, cfg.apiKey, model, systemPrompt, userContent, controller.signal)
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
       throw new Error(`hood-traders llm.ts: ${cfg.provider} request timed out after ${timeoutMs}ms`)
@@ -86,7 +147,8 @@ async function callProvider(
   provider: LlmProvider,
   apiKey: string,
   model: string,
-  brief: string,
+  systemPrompt: string,
+  userContent: string,
   signal: AbortSignal,
 ): Promise<string> {
   if (provider === 'anthropic') {
@@ -101,8 +163,8 @@ async function callProvider(
       body: JSON.stringify({
         model,
         max_tokens: 300,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: 'user', content: brief }],
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userContent }],
       }),
     })
     const body = await res.text()
@@ -128,8 +190,8 @@ async function callProvider(
       model,
       max_tokens: 300,
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: brief },
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userContent },
       ],
     }),
   })
@@ -197,4 +259,51 @@ export function parseVerdict(text: string): LlmVerdict {
   }
   const confidence = Math.min(1, Math.max(0, confidenceRaw))
   return { buy: v.buy, confidence, thesis: v.thesis.trim() }
+}
+
+const JEV_SYSTEM_PROMPT = [
+  'You are a low-latency trading signal judge for brand-new token launches on Robinhood Chain.',
+  'You will receive ONE JSON object: a numeric feature vector, already computed from real on-chain',
+  'data (liquidity depth, contract risk score, sellability, smart-wallet buying activity, cluster',
+  'coordination, momentum). You have no other context — do not invent facts not in the vector.',
+  '',
+  `Reply with ONLY a single JSON object, no prose before or after it, no explanation sentence,`,
+  'matching exactly:',
+  '{"decision": "BUY" | "REJECT" | "WATCH", "confidence": number between 0 and 1, "reason_codes": string[]}',
+  '',
+  `"reason_codes" MUST be chosen only from this fixed list (use 1-4 of them, the ones that actually`,
+  `drove your decision): ${JEV_REASON_CODES.join(', ')}.`,
+  'Never return a sentence, an explanation, or a code not in that list.',
+  '"BUY" should be rare — most launches should get REJECT or WATCH. "WATCH" means promising but not',
+  'yet confident enough to trade.',
+].join('\n')
+
+/** Extract the first `{...}` blob from `text` and validate it as a {@link JevVerdict}. Throws on any mismatch. */
+export function parseJevVerdict(text: string): JevVerdict {
+  const match = text.match(/\{[\s\S]*\}/)
+  if (!match)
+    throw new Error(`hood-traders llm.ts: no JSON object found in JEV response: ${text.slice(0, 300)}`)
+  let raw: unknown
+  try {
+    raw = JSON.parse(match[0])
+  } catch (err) {
+    throw new Error(`hood-traders llm.ts: JEV response JSON did not parse: ${(err as Error).message}`)
+  }
+  if (typeof raw !== 'object' || raw === null) {
+    throw new Error('hood-traders llm.ts: JEV verdict was not a JSON object')
+  }
+  const v = raw as Record<string, unknown>
+  if (v.decision !== 'BUY' && v.decision !== 'REJECT' && v.decision !== 'WATCH') {
+    throw new Error(`hood-traders llm.ts: JEV verdict has invalid "decision": ${JSON.stringify(v)}`)
+  }
+  const confidenceRaw = typeof v.confidence === 'number' ? v.confidence : Number(v.confidence)
+  if (!Number.isFinite(confidenceRaw)) {
+    throw new Error(`hood-traders llm.ts: JEV verdict has non-numeric "confidence": ${JSON.stringify(v)}`)
+  }
+  if (!Array.isArray(v.reason_codes) || !v.reason_codes.every((c) => typeof c === 'string')) {
+    throw new Error(`hood-traders llm.ts: JEV verdict missing string[] "reason_codes": ${JSON.stringify(v)}`)
+  }
+  const known = new Set<string>(JEV_REASON_CODES)
+  const reasonCodes = (v.reason_codes as string[]).filter((c) => known.has(c))
+  return { decision: v.decision, confidence: Math.min(1, Math.max(0, confidenceRaw)), reasonCodes }
 }

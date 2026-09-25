@@ -338,6 +338,43 @@ export class WalletStore {
       .run(unrealizedPnlUsd, now, wallet.toLowerCase())
   }
 
+  /**
+   * Every classified buy/sell for `token` since `sinceMs` — the raw material
+   * for Level 8's buy_pressure/sell_pressure/volume_acceleration/
+   * price_momentum feature-vector fields (see decision/feature-vector.ts).
+   */
+  recentTransfers(
+    token: Address,
+    sinceMs: number,
+  ): { side: 'buy' | 'sell'; wallet: Address; amountUsd: number; mcapUsd: number | null; ts: number }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT side, wallet, amount_usd, mcap_usd, ts FROM wallet_transfers WHERE token=? AND ts>=? ORDER BY ts ASC`,
+      )
+      .all(token.toLowerCase(), sinceMs) as {
+      side: 'buy' | 'sell'
+      wallet: string
+      amount_usd: number
+      mcap_usd: number | null
+      ts: number
+    }[]
+    return rows.map((r) => ({
+      side: r.side,
+      wallet: r.wallet as Address,
+      amountUsd: r.amount_usd,
+      mcapUsd: r.mcap_usd,
+      ts: r.ts,
+    }))
+  }
+
+  /** Distinct wallets that bought `token` since `sinceMs` — used to pull smart-wallet scores for the feature vector. */
+  recentBuyers(token: Address, sinceMs: number): Address[] {
+    const rows = this.db
+      .prepare(`SELECT DISTINCT wallet FROM wallet_transfers WHERE token=? AND side='buy' AND ts>=?`)
+      .all(token.toLowerCase(), sinceMs) as { wallet: string }[]
+    return rows.map((r) => r.wallet as Address)
+  }
+
   close(): void {
     this.db.close()
   }
