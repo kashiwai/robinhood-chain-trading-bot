@@ -52,6 +52,7 @@
     "fleet": "tsx src/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run tests/unit",
+    "test:replay": "vitest run tests/replay --testTimeout 60000",
     "test:e2e": "vitest run tests/e2e --testTimeout 120000",
     "snapshot": "tsx scripts/capture-snapshot.ts",
     "testnet-trade": "tsx scripts/testnet-trade.ts",

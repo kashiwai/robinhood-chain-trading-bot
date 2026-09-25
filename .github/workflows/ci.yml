@@ -76,6 +76,20 @@ jobs:
       - run: npm ci
       - run: npm test
 
+  # Deterministic, in-memory — no live network, so unlike integration-tests
+  # below this is a required (blocking) gate.
+  replay-tests:
+    needs: install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run test:replay
+
   # Talks to live Robinhood Chain mainnet RPC (no mocks — see tests/e2e/live.test.ts).
   # Non-blocking: a public-RPC hiccup or rate limit must never fail an unrelated PR.
   # A red run here is still surfaced in the GitHub UI and must be triaged by a human.

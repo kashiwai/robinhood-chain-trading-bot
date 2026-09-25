@@ -1,4 +1,4 @@
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { loadFleetConfig, loadLlmConfig, loadLlmMinConfidence } from './framework/config.js'
 import { Fleet } from './framework/fleet.js'
@@ -7,6 +7,9 @@ import { Momentum } from './strategies/momentum.js'
 import { PremiumWatch } from './strategies/premium-watch.js'
 import { LlmStrategist } from './strategies/llm-strategist.js'
 import { createDashboardServer } from './server/dashboard.js'
+import { RpcManager } from './chain/rpc-manager.js'
+import { EventQueue } from './discovery/event-queue.js'
+import { LaunchDetector } from './discovery/launch-detector.js'
 
 // main.ts sits at a stable one-level depth in both trees: src/main.ts (tsx,
 // dev) and dist/main.js (tsup bundle, prod) — so "one level up + dashboard"
@@ -17,9 +20,39 @@ async function main(): Promise<void> {
   const config = loadFleetConfig()
   const fleet = new Fleet(config)
 
+  // ── discovery: durable event queue + RPC-redundant launch watcher ──────────
+  // Independent of `fleet.market` (the execution/quoting client) — see
+  // src/chain/rpc-manager.ts's doc comment for why discovery-path and
+  // execution-path RPC redundancy are kept separate.
+  if (!config.rpcUrl && !config.wsRpcUrl) {
+    console.warn(
+      'discovery: no HOOD_RPC_URL/HOOD_WS_RPC_URL set — running against the free public RPC only. ' +
+        'Verified directly: that endpoint rate-limits real launch-watching traffic (429s under normal ' +
+        'polling load). Set one of those two in .env for reliable discovery; see .env.example.',
+    )
+  }
+  const discoveryDbPath =
+    config.dbPath === ':memory:' ? ':memory:' : join(dirname(config.dbPath), 'discovery.db')
+  const discoveryQueue = new EventQueue(discoveryDbPath)
+  const rpc = RpcManager.create({
+    network: config.network,
+    wsRpcUrl: config.wsRpcUrl,
+    httpRpcUrl: config.rpcUrl,
+    stockTokenEligible: config.stockTokenEligible,
+  })
+  const chainId = config.network === 'testnet' ? 46630 : 4663
+  const launchDetector = new LaunchDetector({
+    rpc,
+    queue: discoveryQueue,
+    chainId,
+    onError: (e) => console.warn(`discovery: ${e.message}`),
+  })
+  rpc.start()
+  await launchDetector.start()
+
   const agentIds = ['sniper-1', 'momentum-1', 'premium-1']
   fleet.addAgents([
-    { id: 'sniper-1', strategy: new LaunchSniper(), tickIntervalMs: 4000 },
+    { id: 'sniper-1', strategy: new LaunchSniper({}, discoveryQueue), tickIntervalMs: 4000 },
     { id: 'momentum-1', strategy: new Momentum(), tickIntervalMs: 15000 },
     { id: 'premium-1', strategy: new PremiumWatch(), tickIntervalMs: 30000 },
   ])
@@ -70,6 +103,9 @@ async function main(): Promise<void> {
 
   const shutdown = () => {
     console.log('\nshutting down — stopping agents, closing journal…')
+    launchDetector.stop()
+    rpc.stop()
+    discoveryQueue.close()
     server.close()
     fleet.close()
     process.exit(0)

@@ -13,6 +13,7 @@ import {
 } from 'hoodchain'
 import { formatUnits, parseUnits, type Account, type Address } from 'viem'
 import type { FleetConfig } from './config.js'
+import { httpTransport } from '../chain/http-transport.js'
 
 /** A memecoin/token spot price sourced from live Uniswap v3 liquidity. */
 export interface SpotPrice {
@@ -43,7 +44,10 @@ export class Market {
   constructor(config: FleetConfig, account?: Account) {
     this.client = createHoodClient({
       chain: config.network,
-      rpcUrl: config.rpcUrl,
+      // `transport` (not `rpcUrl`) so the Cloudflare User-Agent fix applies —
+      // see chain/http-transport.ts's doc comment. `httpTransport(undefined)`
+      // still resolves to the chain's baked-in public RPC when unset.
+      transport: httpTransport(config.rpcUrl),
       account,
       acknowledgeStockTokenEligibility: config.stockTokenEligible,
     })

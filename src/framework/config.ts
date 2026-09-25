@@ -6,6 +6,8 @@ import type { LlmClientConfig, LlmProvider } from './llm.js'
 export interface FleetConfig {
   network: HoodNetwork
   rpcUrl: string | undefined
+  /** Optional wss:// endpoint — primary tier for the discovery RpcManager (true push, no poll latency). */
+  wsRpcUrl: string | undefined
   mode: Mode
   /** Set true only when HOOD_TRADERS_LIVE=1 AND a key is present. */
   hasWallet: boolean
@@ -53,6 +55,7 @@ export function loadFleetConfig(env: NodeJS.ProcessEnv = process.env): FleetConf
   return {
     network,
     rpcUrl: env.HOOD_RPC_URL || undefined,
+    wsRpcUrl: env.HOOD_WS_RPC_URL || undefined,
     mode,
     hasWallet: hasKey,
     privateKey: hasKey ? privateKey : undefined,
