@@ -3,6 +3,7 @@ import { OrderStore } from '../execution/order-store.js'
 import { ProbeStore } from '../execution/probe-store.js'
 import { ShadowRunTracker } from './shadow-run.js'
 import { computePerformance } from '../analytics/performance.js'
+import { evaluateFingerprintMatch, type BuildFingerprint } from './build-fingerprint.js'
 import type { LaunchGateEvidence } from './launch-gate.js'
 
 export interface CollectEvidenceOptions {
@@ -17,6 +18,10 @@ export interface CollectEvidenceOptions {
   backupLastRunAt: number | null
   /** Static fact about this codebase (Level 6 wires recoverPendingOrders into main.ts's live-mode startup) — not re-derived at runtime. */
   restartRecoveryWired: boolean
+  /** Level 10.1: the fingerprint of the build attempting to go live RIGHT NOW — compared against `shadowRun.recordedFingerprint()`. */
+  currentFingerprint: BuildFingerprint
+  /** Level 10.1's explicit allow-rule: prior commit SHAs an operator has reviewed and vouches for as not affecting trading logic. Empty by default — strict. */
+  allowedPriorShas?: readonly string[]
 }
 
 /**
@@ -52,6 +57,11 @@ export function collectLaunchGateEvidence(opts: CollectEvidenceOptions): LaunchG
     }
   }
 
+  const recordedFingerprint = opts.shadowRun.recordedFingerprint()
+  const buildFingerprintMatch = recordedFingerprint
+    ? evaluateFingerprintMatch(recordedFingerprint, opts.currentFingerprint, opts.allowedPriorShas ?? [])
+    : null
+
   return {
     levelTestsPass: opts.levelTestsPass,
     replayPass: opts.replayPass,
@@ -64,5 +74,6 @@ export function collectLaunchGateEvidence(opts: CollectEvidenceOptions): LaunchG
     securityScanClean: opts.securityScanClean,
     backupLastRunAt: opts.backupLastRunAt,
     restartRecoveryWired: opts.restartRecoveryWired,
+    buildFingerprintMatch,
   }
 }

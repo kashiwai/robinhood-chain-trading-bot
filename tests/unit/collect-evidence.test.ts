@@ -8,6 +8,16 @@ import { OrderStore } from '../../src/execution/order-store.js'
 import { ProbeStore } from '../../src/execution/probe-store.js'
 import { ShadowRunTracker } from '../../src/gates/shadow-run.js'
 import { collectLaunchGateEvidence } from '../../src/gates/collect-evidence.js'
+import { computeBuildFingerprint } from '../../src/gates/build-fingerprint.js'
+
+const FINGERPRINT = computeBuildFingerprint({
+  tradingConfig: { x: 1 },
+  strategyParams: { y: 1 },
+  chainId: 4663,
+  rpcConfig: { rpcUrl: undefined, wsRpcUrl: undefined, network: 'mainnet' },
+  databaseSchemaVersion: '1',
+  gitCommitSha: 'sha1',
+})
 
 const TOKEN_A = '0x1111111111111111111111111111111111111a' as Address
 const TOKEN_B = '0x2222222222222222222222222222222222222b' as Address
@@ -34,6 +44,7 @@ function baseOpts(
     securityScanClean: true,
     backupLastRunAt: Date.now(),
     restartRecoveryWired: true,
+    currentFingerprint: FINGERPRINT,
   }
 }
 
@@ -203,6 +214,63 @@ describe('collectLaunchGateEvidence — real data, not operator-asserted boolean
 
     const evidence = collectLaunchGateEvidence(baseOpts(journal, orderStore, probeStore, shadowRun))
     expect(evidence.shadowUptimePct).toBeCloseTo(2 / 3, 6)
+
+    journal.close()
+    orderStore.close()
+    probeStore.close()
+  })
+
+  it('buildFingerprintMatch is null when the shadow run never recorded a fingerprint', () => {
+    dir = mkdtempSync(join(tmpdir(), 'evid-'))
+    const journal = new Journal(':memory:')
+    const orderStore = new OrderStore(':memory:')
+    const probeStore = new ProbeStore(':memory:')
+    const shadowRun = new ShadowRunTracker(join(dir, 'shadow.json')) // no fingerprint passed
+
+    const evidence = collectLaunchGateEvidence(baseOpts(journal, orderStore, probeStore, shadowRun))
+    expect(evidence.buildFingerprintMatch).toBeNull()
+
+    journal.close()
+    orderStore.close()
+    probeStore.close()
+  })
+
+  it('buildFingerprintMatch reflects a real match against the recorded shadow-run fingerprint', () => {
+    dir = mkdtempSync(join(tmpdir(), 'evid-'))
+    const journal = new Journal(':memory:')
+    const orderStore = new OrderStore(':memory:')
+    const probeStore = new ProbeStore(':memory:')
+    const shadowRun = new ShadowRunTracker(join(dir, 'shadow.json'), FINGERPRINT)
+
+    const evidence = collectLaunchGateEvidence(baseOpts(journal, orderStore, probeStore, shadowRun))
+    expect(evidence.buildFingerprintMatch).toEqual({ matches: true, mismatchedFields: [] })
+
+    journal.close()
+    orderStore.close()
+    probeStore.close()
+  })
+
+  it('buildFingerprintMatch reflects a real mismatch when the current build differs from what shadow-run recorded', () => {
+    dir = mkdtempSync(join(tmpdir(), 'evid-'))
+    const journal = new Journal(':memory:')
+    const orderStore = new OrderStore(':memory:')
+    const probeStore = new ProbeStore(':memory:')
+    const shadowRun = new ShadowRunTracker(join(dir, 'shadow.json'), FINGERPRINT)
+
+    const differentFingerprint = computeBuildFingerprint({
+      tradingConfig: { x: 999 }, // a real config change
+      strategyParams: { y: 1 },
+      chainId: 4663,
+      rpcConfig: { rpcUrl: undefined, wsRpcUrl: undefined, network: 'mainnet' },
+      databaseSchemaVersion: '1',
+      gitCommitSha: 'sha1',
+    })
+    const evidence = collectLaunchGateEvidence({
+      ...baseOpts(journal, orderStore, probeStore, shadowRun),
+      currentFingerprint: differentFingerprint,
+    })
+    expect(evidence.buildFingerprintMatch?.matches).toBe(false)
+    expect(evidence.buildFingerprintMatch?.mismatchedFields).toContain('configHash')
 
     journal.close()
     orderStore.close()

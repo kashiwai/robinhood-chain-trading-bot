@@ -18,6 +18,7 @@ function readyEvidence(overrides: Partial<LaunchGateEvidence> = {}): LaunchGateE
     securityScanClean: true,
     backupLastRunAt: Date.now() - 60_000,
     restartRecoveryWired: true,
+    buildFingerprintMatch: { matches: true, mismatchedFields: [] },
     ...overrides,
   }
 }
@@ -95,6 +96,22 @@ describe("evaluateLaunchGate — the spec's all-or-nothing Live Start Gate", () 
       readyEvidence({ levelTestsPass: false, paperClosedTrades: 0, securityScanClean: false }),
     )
     expect(result.blockers.length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('a null buildFingerprintMatch (no fingerprint ever recorded) blocks launch', () => {
+    const result = evaluateLaunchGate(readyEvidence({ buildFingerprintMatch: null }))
+    expect(result.ready).toBe(false)
+    expect(result.flags.BUILD_FINGERPRINT_PASS).toBe(false)
+    expect(result.blockers.some((b) => b.includes('no build fingerprint'))).toBe(true)
+  })
+
+  it('a mismatched buildFingerprintMatch blocks launch and names the mismatched fields', () => {
+    const result = evaluateLaunchGate(
+      readyEvidence({ buildFingerprintMatch: { matches: false, mismatchedFields: ['configHash'] } }),
+    )
+    expect(result.ready).toBe(false)
+    expect(result.flags.BUILD_FINGERPRINT_PASS).toBe(false)
+    expect(result.blockers.some((b) => b.includes('configHash'))).toBe(true)
   })
 
   it('custom (stricter) thresholds are respected', () => {

@@ -3,6 +3,21 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ShadowRunTracker } from '../../src/gates/shadow-run.js'
+import { computeBuildFingerprint, type BuildFingerprint } from '../../src/gates/build-fingerprint.js'
+
+function fingerprint(
+  overrides: Partial<Parameters<typeof computeBuildFingerprint>[0]> = {},
+): BuildFingerprint {
+  return computeBuildFingerprint({
+    tradingConfig: { x: 1 },
+    strategyParams: { y: 1 },
+    chainId: 4663,
+    rpcConfig: { rpcUrl: undefined, wsRpcUrl: undefined, network: 'mainnet' },
+    databaseSchemaVersion: '1',
+    gitCommitSha: 'sha1',
+    ...overrides,
+  })
+}
 
 let dir: string
 afterEach(() => {
@@ -56,5 +71,29 @@ describe('ShadowRunTracker', () => {
 
     const restarted = new ShadowRunTracker(statePath)
     expect(restarted.uptimePct()).toBeCloseTo(0.75, 6) // not reset by the "restart"
+  })
+
+  it('recordedFingerprint is null when no fingerprint was ever supplied', () => {
+    dir = mkdtempSync(join(tmpdir(), 'shadow-'))
+    const tracker = new ShadowRunTracker(join(dir, 'shadow-state.json'))
+    expect(tracker.recordedFingerprint()).toBeNull()
+  })
+
+  it('a fingerprint supplied on first use is pinned and persists across restarts', () => {
+    dir = mkdtempSync(join(tmpdir(), 'shadow-'))
+    const statePath = join(dir, 'shadow-state.json')
+    const first = new ShadowRunTracker(statePath, fingerprint({ gitCommitSha: 'sha1' }))
+    expect(first.recordedFingerprint()?.gitCommitSha).toBe('sha1')
+
+    const restarted = new ShadowRunTracker(statePath) // no fingerprint passed this time — simulates a normal restart
+    expect(restarted.recordedFingerprint()?.gitCommitSha).toBe('sha1') // still the ORIGINAL, not cleared
+  })
+
+  it('a DIFFERENT fingerprint on a later boot does NOT overwrite the originally-pinned one', () => {
+    dir = mkdtempSync(join(tmpdir(), 'shadow-'))
+    const statePath = join(dir, 'shadow-state.json')
+    new ShadowRunTracker(statePath, fingerprint({ gitCommitSha: 'sha1' }))
+    const second = new ShadowRunTracker(statePath, fingerprint({ gitCommitSha: 'sha2' }))
+    expect(second.recordedFingerprint()?.gitCommitSha).toBe('sha1') // the pinned baseline, not the new boot's
   })
 })

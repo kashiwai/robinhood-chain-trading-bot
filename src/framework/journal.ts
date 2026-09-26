@@ -4,6 +4,16 @@ import { dirname } from 'node:path'
 import type { DecisionRecord, EquityPoint, TradeRecord } from './types.js'
 
 /**
+ * Level 10.1: a manually-bumped marker of the trades/decisions/equity table
+ * shapes across ALL of this codebase's SQLite stores (Journal, OrderStore,
+ * ProbeStore, EventQueue, WalletStore) — fed into the build fingerprint (see
+ * gates/build-fingerprint.ts) so a schema change invalidates old shadow/
+ * paper/probe evidence the same way a trading-logic change does. Bump this
+ * whenever any store's migrate() adds/changes/removes a column or table.
+ */
+export const DATABASE_SCHEMA_VERSION = '1'
+
+/**
  * The decision journal — the agent's black box recorder. Every observe, every
  * refusal, every trade (paper or live), and every equity mark lands here so the
  * dashboard can answer "why did this trade fire?" and the whole run is auditable

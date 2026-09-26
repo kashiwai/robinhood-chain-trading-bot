@@ -1,3 +1,5 @@
+import type { FingerprintMatchResult } from './build-fingerprint.js'
+
 export interface LaunchGateEvidence {
   /** `npm test` (all unit suites, which cover Levels 1-9's acceptance criteria) exits clean. */
   levelTestsPass: boolean
@@ -21,6 +23,15 @@ export interface LaunchGateEvidence {
   backupLastRunAt: number | null
   /** recoverPendingOrders (Level 6) is wired into main.ts's live-mode startup path. */
   restartRecoveryWired: boolean
+  /**
+   * Level 10.1: the shadow/paper/probe evidence's pinned build fingerprint
+   * compared against the CURRENT build attempting to go live (see
+   * gates/build-fingerprint.ts). `null` means no fingerprint was ever
+   * recorded (e.g. a shadow run that predates Level 10.1, or one that never
+   * started) — treated as a failure, not a free pass, same as any other
+   * missing evidence.
+   */
+  buildFingerprintMatch: FingerprintMatchResult | null
 }
 
 export interface LaunchGateThresholds {
@@ -77,6 +88,7 @@ export function evaluateLaunchGate(
     BACKUP_PASS:
       evidence.backupLastRunAt !== null && now - evidence.backupLastRunAt <= thresholds.maxBackupAgeMs,
     RECOVERY_PASS: evidence.restartRecoveryWired,
+    BUILD_FINGERPRINT_PASS: evidence.buildFingerprintMatch?.matches === true,
   }
 
   const blockers = Object.entries(flags)
@@ -104,6 +116,10 @@ function describeBlocker(flag: string, e: LaunchGateEvidence, t: LaunchGateThres
       return e.backupLastRunAt === null ? 'no backup has ever been run' : 'backup is stale'
     case 'RECOVERY_PASS':
       return 'restart recovery is not wired into the live-mode startup path'
+    case 'BUILD_FINGERPRINT_PASS':
+      return e.buildFingerprintMatch === null
+        ? 'no build fingerprint was ever recorded for the accumulated shadow/paper/probe evidence'
+        : `evidence was recorded under a different build — mismatched fields: ${e.buildFingerprintMatch.mismatchedFields.join(', ')}`
     default:
       return flag
   }
