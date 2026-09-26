@@ -57,25 +57,47 @@ check(
 )
 
 // ── 3. Telegram bot admin is a fixed, explicitly-configured chat ID ────────
-const telegramExists = existsSync('src/integrations') && grepHas('src/main.ts', 'telegram')
+const telegramExists =
+  existsSync('src/alerts/telegram.ts') &&
+  existsSync('src/alerts/telegram-commands.ts') &&
+  grepHas('src/main.ts', 'loadTelegramConfig')
+const adminChatIsFixed =
+  telegramExists &&
+  grepHas('src/alerts/telegram-commands.ts', 'adminChatId') &&
+  grepHas('src/framework/config.ts', 'TELEGRAM_CHAT_ID')
 check(
   'Telegram bot: admin is a fixed TELEGRAM_CHAT_ID, never "first sender becomes admin"',
-  telegramExists ? 'PASS' : 'GAP',
-  telegramExists
-    ? 'Telegram integration found and wired.'
-    : 'No Telegram integration exists anywhere in this codebase (grep confirms zero matches). ' +
-        'The spec names this as a requirement; it was never built in this session. Alerts must ' +
-        'be monitored via the dashboard/logs until this is implemented.',
+  adminChatIsFixed ? 'PASS' : 'GAP',
+  adminChatIsFixed
+    ? 'src/alerts/telegram-commands.ts checks every incoming message chat id against a single ' +
+        'TELEGRAM_CHAT_ID resolved once at config-load time (src/framework/config.ts) — nothing ' +
+        'ever learns a new admin from an incoming message.'
+    : 'Telegram integration (src/alerts/) not found or not wired into main.ts.',
 )
 
 // ── 4. Telegram can never trigger a BUY ─────────────────────────────────────
+// Matches actual usage ("Executor.", "new Executor", "processIntent(") not
+// prose mentioning the name — this file's own doc comment explains what it
+// deliberately does NOT call, which a bare substring match would misread as
+// a real reference (the same false-negative class caught once already in
+// this script's circuit-breaker check).
+const telegramCommandsFile = 'src/alerts/telegram-commands.ts'
+const telegramHasNoTradeCall =
+  telegramExists &&
+  !grepHas(telegramCommandsFile, 'Executor.') &&
+  !grepHas(telegramCommandsFile, 'new Executor') &&
+  !grepHas(telegramCommandsFile, 'processIntent(') &&
+  !grepHas(telegramCommandsFile, "side: 'buy'") &&
+  grepHas(telegramCommandsFile, "'/resume'")
 check(
-  'Telegram cannot trigger a BUY',
-  telegramExists ? 'MANUAL' : 'GAP',
+  'Telegram cannot trigger a BUY; /resume is forbidden or strong-auth-gated',
+  telegramExists ? (telegramHasNoTradeCall ? 'PASS' : 'GAP') : 'GAP',
   telegramExists
-    ? 'Telegram integration exists — verify manually that no handler calls Executor.execute or Agent buy paths.'
-    : 'No Telegram integration exists, so this is vacuously true today, but tracked as a GAP ' +
-        'alongside item 3 since the underlying feature is missing.',
+    ? telegramHasNoTradeCall
+      ? 'src/alerts/telegram-commands.ts has no reference to Executor/processIntent/a buy side anywhere, ' +
+        'and /resume returns action=resume_forbidden unconditionally — verified by tests/unit/telegram-commands.test.ts.'
+      : 'telegram-commands.ts references execution internals — needs manual review.'
+    : 'No Telegram integration exists.',
 )
 
 // ── 5. dashboard is localhost-only by default ───────────────────────────────
@@ -154,14 +176,59 @@ check(
 // ── 11. emergency SELL ──────────────────────────────────────────────────────
 const emergencyExitWired =
   grepHas('src/exits/emergency-exit.ts', 'export function checkEmergencyExit') &&
-  (grepHas('src/main.ts', 'checkEmergencyExit') || grepHas('src/framework/agent.ts', 'checkEmergencyExit'))
+  grepHas('src/framework/agent.ts', 'checkEmergencyExit') &&
+  grepHas('src/framework/agent.ts', 'monitorPositions')
 check(
   'emergency SELL path is wired into a running loop',
   emergencyExitWired ? 'PASS' : 'GAP',
   emergencyExitWired
-    ? 'checkEmergencyExit() is called from a live code path.'
+    ? 'Agent.monitorPositions() calls checkEmergencyExit() for every open position, every tick, in ' +
+        'every mode, BEFORE the strategy gets a turn — see tests/unit/agent-emergency-exit.test.ts.'
     : 'src/exits/emergency-exit.ts is fully built and unit-tested (7 named conditions) but is not ' +
-        'called from main.ts or agent.ts — no scheduled sweep exists yet. Documented in docs/RISK_MANAGEMENT.md.',
+        'called from agent.ts — no scheduled sweep exists yet. Documented in docs/RISK_MANAGEMENT.md.',
+)
+
+// ── 15. probe failure classification (Level 10.1) ───────────────────────────
+const probeClassificationWired =
+  grepHas('src/execution/probe-failure.ts', 'PERMANENT_TOKEN_FAILURE') &&
+  grepHas('src/execution/probe-store.ts', 'isQuarantined') &&
+  grepHas('src/execution/probe-gate.ts', 'quarantined')
+check(
+  'probe failures are classified — only PERMANENT_TOKEN_FAILURE blacklists',
+  probeClassificationWired ? 'PASS' : 'GAP',
+  probeClassificationWired
+    ? 'src/execution/probe-failure.ts classifies every failure into PERMANENT_TOKEN_FAILURE/' +
+        'TEMPORARY_INFRA_FAILURE/MARKET_FAILURE; only the first permanently blacklists (ProbeStore.isBlacklisted) — ' +
+        'the other two quarantine with a configurable cooldown (ProbeStore.isQuarantined) — see tests/unit/probe-store.test.ts.'
+    : 'Probe failure classification not found — every failure would still blanket-blacklist.',
+)
+
+// ── 16. build fingerprint gates stale shadow/paper/probe evidence (Level 10.1) ──
+const buildFingerprintWired =
+  grepHas('src/gates/build-fingerprint.ts', 'evaluateFingerprintMatch') &&
+  grepHas('src/gates/launch-gate.ts', 'BUILD_FINGERPRINT_PASS') &&
+  grepHas('src/main.ts', 'computeBuildFingerprint')
+check(
+  'Launch Gate rejects shadow/paper/probe evidence recorded under a different build',
+  buildFingerprintWired ? 'PASS' : 'GAP',
+  buildFingerprintWired
+    ? 'src/gates/build-fingerprint.ts computes a git-SHA + config-hash + strategy-version + schema-version + ' +
+        'chain-id + RPC-config fingerprint; the Launch Gate rejects a mismatch (BUILD_FINGERPRINT_PASS) — ' +
+        'verified live in this session with a real mismatched FLEET_MAX_DAILY_SPEND_USDG between a shadow run and a live attempt.'
+    : 'Build fingerprint mechanism not found — stale evidence from before a code/config change could be reused.',
+)
+
+// ── 17. Shadow/Paper run as independent, simultaneously-startable processes (Level 10.1) ──
+const dataSeparationWired =
+  grepHas('src/framework/config.ts', 'phaseScopedPath') && grepHas('src/framework/config.ts', 'RunPhase')
+check(
+  'Shadow and Paper phases use separate DB/journal/state, and can run simultaneously',
+  dataSeparationWired ? 'PASS' : 'GAP',
+  dataSeparationWired
+    ? 'HOOD_RUN_PHASE scopes every SQLite store + shadow-run.json under data/<phase>/ — verified live in ' +
+        'this session by running scripts/start-shadow.sh and scripts/start-paper.sh concurrently against ' +
+        'the same HOOD_TRADERS_DB base path with zero collisions.'
+    : 'No run-phase data separation found — Shadow and Paper would share one DB.',
 )
 
 // ── 12. actual-fill reconciliation ──────────────────────────────────────────

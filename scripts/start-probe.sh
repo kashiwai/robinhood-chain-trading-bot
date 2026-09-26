@@ -10,9 +10,13 @@
 #
 # Requires the same three live-mode conditions as scripts/start-live.sh:
 # HOOD_TRADERS_LIVE=1, ROBINHOOD_CHAIN_PRIVATE_KEY, LIVE_ACKNOWLEDGED=YES.
-# The in-process Launch Gate (src/main.ts) still refuses to boot into live
-# mode at all unless the shadow/paper/probe evidence is real and sufficient —
-# this script does not and cannot bypass that.
+#
+# Level 10.1: runs under HOOD_RUN_PHASE=probe, scoping every SQLite store
+# under data/probe/ (separate from data/shadow/, data/paper/, data/live/).
+# The Launch Gate is NOT evaluated for this phase — probe evidence is one of
+# the gate's own prerequisites, so gating this phase against itself would be
+# circular. Only scripts/start-live.sh's `live` phase is actually gated —
+# and it reads THIS phase's data/probe/ evidence to decide whether it's ready.
 #
 # Usage: scripts/start-probe.sh
 set -euo pipefail
@@ -22,11 +26,13 @@ cd "$(dirname "$0")/.."
 : "${ROBINHOOD_CHAIN_PRIVATE_KEY:?set ROBINHOOD_CHAIN_PRIVATE_KEY before running this script}"
 : "${LIVE_ACKNOWLEDGED:?set LIVE_ACKNOWLEDGED=YES before running this script — this trades real funds}"
 
+export HOOD_RUN_PHASE=probe
 export AGENT_MAX_POSITION_USDG="${AGENT_MAX_POSITION_USDG:-10}"
 export AGENT_MAX_DAILY_SPEND_USDG="${AGENT_MAX_DAILY_SPEND_USDG:-20}"
 export FLEET_MAX_DAILY_SPEND_USDG="${FLEET_MAX_DAILY_SPEND_USDG:-30}"
+export DASHBOARD_PORT="${DASHBOARD_PORT:-4673}"
 
 echo "hood-traders: starting PROBE phase — LIVE mode, real funds, deliberately small caps:"
 echo "  AGENT_MAX_POSITION_USDG=$AGENT_MAX_POSITION_USDG AGENT_MAX_DAILY_SPEND_USDG=$AGENT_MAX_DAILY_SPEND_USDG FLEET_MAX_DAILY_SPEND_USDG=$FLEET_MAX_DAILY_SPEND_USDG"
-echo "the Launch Gate inside the process will still refuse to start unless shadow/paper evidence is real and sufficient."
+echo "data is stored under data/probe/ — start-live.sh reads it from there when checking the Launch Gate."
 exec npm run fleet

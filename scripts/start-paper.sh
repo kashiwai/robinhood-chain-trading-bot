@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Starts the fleet in paper mode to accumulate closed paper trades (spec
-# 10-C: >=200 closed paper trades before live). This is the SAME process as
-# scripts/start-shadow.sh — a running paper-mode fleet accumulates BOTH the
-# shadow-run uptime clock AND paper trade count simultaneously, since they're
-# read from the same journal/shadow-run.json. This script exists as a
-# separate, clearly-named entry point because the spec names it separately;
-# functionally there is nothing to choose between the two.
+# 10-C: >=200 closed paper trades before live).
+#
+# Level 10.1: this is now a GENUINELY SEPARATE process/data directory from
+# start-shadow.sh — HOOD_RUN_PHASE=paper scopes every SQLite store under
+# data/paper/, independent of data/shadow/'s DB, journal, and state cursor.
+# The two can run at the same time (see docs/LIVE_TRADING.md); this script
+# defaults to DASHBOARD_PORT=4672 so it doesn't collide with
+# start-shadow.sh's default of 4671.
 #
 # Usage: scripts/start-paper.sh
 set -euo pipefail
@@ -13,4 +15,6 @@ cd "$(dirname "$0")/.."
 
 echo "hood-traders: starting PAPER trading (simulated fills, no real funds)"
 export HOOD_TRADERS_LIVE=0
+export HOOD_RUN_PHASE=paper
+export DASHBOARD_PORT="${DASHBOARD_PORT:-4672}"
 exec npm run fleet
