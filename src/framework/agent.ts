@@ -7,10 +7,19 @@ import type { KillSwitch } from './kill.js'
 import type { Strategy } from './strategy.js'
 import type { AgentStatus, Decision, Intent, Mode, Position, RiskLimits, TradeRecord } from './types.js'
 import type { Executor } from '../execution/executor.js'
+import type { OrderState } from '../execution/order-store.js'
 import type { ProbeGate } from '../execution/probe-gate.js'
 import type { CircuitBreaker } from '../risk/circuit-breaker.js'
 import { checkAccountRisk, type AccountRiskContext } from '../risk/account-risk.js'
 import type { AccountRiskProfile } from '../risk/risk-profile.js'
+import { checkEmergencyExit } from '../exits/emergency-exit.js'
+import {
+  buildEmergencyExitInput,
+  NEUTRAL_ENTRY_SNAPSHOT,
+  type EmergencyEntrySnapshot,
+  type EmergencyMonitorHooks,
+} from '../exits/emergency-monitor.js'
+import type { TelegramAlerter } from '../alerts/telegram.js'
 
 /** Everything an {@link Agent} is constructed with. */
 export interface AgentOptions {
@@ -50,9 +59,29 @@ export interface AgentOptions {
   reportTradeResult?: (pnlUsd: number) => void
   /** Level 10: gates every token's first live buy behind a real $2 probe (see execution/probe-gate.ts). Optional — absent in paper mode and in tests that don't exercise it. */
   probeGate?: ProbeGate
+  /**
+   * Level 10.1: real Level-5/wallet-intel scanners feeding the emergency-exit
+   * layer (see exits/emergency-monitor.ts). Optional — absent means the two
+   * Agent-native checks (sellability, quote anomaly) still protect every
+   * position in every mode; only the scanner-dependent checks (liquidity
+   * collapse, contract-risk jump, retention drop, deployer dump, smart-money
+   * exit, sell-pressure spike) are unavailable.
+   */
+  emergencyMonitor?: EmergencyMonitorHooks
+  /** Minimum ms between real emergency rescans per position — `emergencyMonitor.currentSignals` is real IO and must not run every tick. @defaultValue 60000 */
+  emergencyRescanIntervalMs?: number
+  /** Level 10.1: send-only critical alerts (REAL_BUY/REAL_SELL/SELL_FAILURE/EMERGENCY_EXIT) — see alerts/telegram.ts. Optional; a missing alerter simply means no notification, never a blocked trade. */
+  telegramAlerter?: Pick<TelegramAlerter, 'send'>
+}
+
+/** Deterministic, restart-stable identity for a position's lifetime — used for the emergency-exit idempotency key and journal correlation. */
+function positionKey(pos: Pick<Position, 'token' | 'openedAt'>): string {
+  return `${pos.token.toLowerCase()}:${pos.openedAt}`
 }
 
 const DUST = 1_000n // token smallest-units below which a position is considered closed
+const QUOTE_ANOMALY_DROP_RATIO = 0.5 // a mark-to-mark drop of 50%+ in one tick counts as a quote anomaly
+const SELL_QUOTE_FAIL_STREAK_THRESHOLD = 3 // consecutive failed sell-quotes before treating it as a real sellability loss, not RPC noise
 
 interface LiveExecutionResult {
   hash: Hash
@@ -60,6 +89,19 @@ interface LiveExecutionResult {
   amountOutMinimum: bigint
   /** Real reconciled fill (Level 6, Executor path only) — null on the plain inline-executeLive path. */
   actualAmountOut: bigint | null
+  /** Level 6 order lifecycle terminal state (see execution/order-store.ts) — null on the plain inline-executeLive path, which has no order-store tracking. */
+  orderState: OrderState | null
+  /** The idempotency key the order was created/looked-up under — null on the plain inline-executeLive path. */
+  idempotencyKey: string | null
+}
+
+/** What actually happened to one processed intent — returned so callers (notably the emergency-exit path) can journal the real result without re-deriving it from side effects. */
+export interface IntentOutcome {
+  success: boolean
+  txHash: Hash | null
+  idempotencyKey: string | null
+  orderState: OrderState | null
+  refusalReason: string | null
 }
 
 /**
@@ -85,6 +127,8 @@ export class Agent {
   private readonly clock: () => number
 
   private readonly positions = new Map<string, Position>()
+  /** Positions with an emergency-exit sell currently being attempted — see monitorPositions()'s doc comment for why this, alongside the deterministic idempotency key, is the double-SELL guard. */
+  private readonly emergencyExitInFlight = new Set<string>()
   private lastTradeAt: number | null = null
   private realizedUsd = 0
   private spentTodayUsd = 0
@@ -153,6 +197,16 @@ export class Agent {
     try {
       this.rolloverDay(now)
       await this.markPositions(now)
+      // ── Level 10.1: emergency exit — evaluated for every open position, in
+      // every mode, BEFORE the strategy gets a turn this tick. If a full exit
+      // fires here, the position is gone (or refused-and-unchanged) by the
+      // time decide() below snapshots positions for the strategy, so a
+      // strategy's own hard-stop/take-profit/trailing logic can never race
+      // it — "EMERGENCY EXIT → HARD STOP LOSS → NORMAL EXIT" is enforced by
+      // this ordering, not a shared priority-queue data structure. Still
+      // subject to the kill switch, same as every other order (processIntent
+      // -> RiskEngine.check refuses with kill_switch — no separate bypass).
+      await this.monitorPositions(now)
 
       if (this.kill.isKilled()) {
         // Halted: still mark equity so the curve shows the freeze, but propose nothing.
@@ -215,8 +269,16 @@ export class Agent {
     return { quoteToken: this.market.usdg, quoteSymbol: 'USDG', quoteDecimals: this.market.usdgDecimals }
   }
 
-  private async processIntent(intent: Intent, now: number): Promise<void> {
-    const refuse = (reason: string, detail: string, meta: Record<string, unknown> = {}) => {
+  /**
+   * Returns what actually happened — success/refusal, txHash, the Level 6
+   * order's idempotency key and terminal state where applicable — so callers
+   * that need to journal a richer outcome (the emergency-exit path; see
+   * fireEmergencyExit) don't have to re-derive it from side effects. Every
+   * existing caller (the plain per-tick intent loop) simply ignores the
+   * return value, so this is additive, not a behavior change.
+   */
+  private async processIntent(intent: Intent, now: number): Promise<IntentOutcome> {
+    const refuse = (reason: string, detail: string, meta: Record<string, unknown> = {}): IntentOutcome => {
       this.refusals++
       this.journal.recordDecision({
         agentId: this.id,
@@ -225,6 +287,18 @@ export class Agent {
         detail: `${intent.side} ${intent.tokenSymbol}: ${detail}`,
         meta: { reason, intentReason: intent.reason, ...meta },
       })
+      // SELL_FAILURE — live mode only, and only for a sell (a refused BUY is
+      // routine risk-gating, not an alert-worthy failure). Emergency-exit
+      // sells get their own richer EMERGENCY_EXIT alert instead, so this
+      // skips anything tagged `meta.emergencyExit` to avoid double-alerting
+      // the same event.
+      if (this.mode === 'live' && intent.side === 'sell' && !intent.meta?.emergencyExit) {
+        void this.opts.telegramAlerter?.send(
+          'SELL_FAILURE',
+          `${intent.tokenSymbol}: ${detail} (reason=${reason})`,
+        )
+      }
+      return { success: false, txHash: null, idempotencyKey: null, orderState: null, refusalReason: reason }
     }
 
     const quoteToken = intent.quoteToken
@@ -238,15 +312,13 @@ export class Agent {
       sim = await this.market.quoteSell(intent.token, quoteToken, intent.amountIn)
     }
     if (!sim || sim.amountOut <= 0n) {
-      refuse('no_route', 'no liquid route to simulate the fill')
-      return
+      return refuse('no_route', 'no liquid route to simulate the fill')
     }
 
     // ── notional in USD ────────────────────────────────────────────────────────
     const ethUsd = intent.quoteSymbol === 'WETH' ? await this.market.ethUsd(30_000, now) : 1
     if (ethUsd === null) {
-      refuse('no_route', 'cannot price ETH to enforce USD caps')
-      return
+      return refuse('no_route', 'cannot price ETH to enforce USD caps')
     }
     let notionalUsd: number
     if (intent.side === 'buy') {
@@ -259,8 +331,7 @@ export class Agent {
     const existing = this.positions.get(intent.token.toLowerCase())
     if (intent.side === 'sell') {
       if (!existing || existing.amount < intent.amountIn - DUST) {
-        refuse('insufficient_balance', 'position too small to sell requested amount')
-        return
+        return refuse('insufficient_balance', 'position too small to sell requested amount')
       }
     }
     const positionUsdAfter = intent.side === 'buy' ? (existing?.investedUsd ?? 0) + notionalUsd : 0
@@ -283,8 +354,7 @@ export class Agent {
       fleetMaxDailySpendUsdg: this.opts.fleetMaxDailySpendUsdg,
     })
     if (!verdict.ok) {
-      refuse(verdict.reason ?? 'refused', verdict.detail, { notionalUsd: round(notionalUsd) })
-      return
+      return refuse(verdict.reason ?? 'refused', verdict.detail, { notionalUsd: round(notionalUsd) })
     }
 
     // ── Level 7: circuit breaker + account-wide risk (buys only — sells always pass, same principle as above) ──
@@ -294,10 +364,9 @@ export class Agent {
           .activeConditions()
           .map((c) => c.condition)
           .join(', ')
-        refuse('circuit_breaker', `BUY paused — active breaker(s): ${conditions}`, {
+        return refuse('circuit_breaker', `BUY paused — active breaker(s): ${conditions}`, {
           notionalUsd: round(notionalUsd),
         })
-        return
       }
       if (this.opts.accountRisk) {
         const accountVerdict = checkAccountRisk(
@@ -305,10 +374,9 @@ export class Agent {
           this.opts.accountRisk.profile,
         )
         if (!accountVerdict.ok) {
-          refuse(accountVerdict.reason ?? 'account_risk', accountVerdict.detail, {
+          return refuse(accountVerdict.reason ?? 'account_risk', accountVerdict.detail, {
             notionalUsd: round(notionalUsd),
           })
-          return
         }
       }
 
@@ -321,26 +389,54 @@ export class Agent {
           slippageBps,
         })
         if (gate.action !== 'already_passed') {
-          refuse(gate.action === 'blacklisted' ? 'probe_blacklisted' : 'probe_ran_this_tick', gate.reason, {
-            notionalUsd: round(notionalUsd),
-          })
-          return
+          const reasonByAction: Record<'blacklisted' | 'quarantined' | 'probed', string> = {
+            blacklisted: 'probe_blacklisted',
+            quarantined: 'probe_quarantined',
+            probed: 'probe_ran_this_tick',
+          }
+          return refuse(reasonByAction[gate.action], gate.reason, { notionalUsd: round(notionalUsd) })
         }
+      }
+    }
+
+    // ── Level 10.1: capture the emergency-exit entry snapshot on a brand-new
+    // buy — real IO (Level 5 scans), only when a position doesn't already
+    // exist for this token, so a subsequent add-on buy never overwrites the
+    // original baseline. Stored into intent.meta so applyFill's normal
+    // meta-copy-onto-position path carries it, same as every other
+    // strategy-supplied meta field. ──
+    if (intent.side === 'buy' && !existing && this.opts.emergencyMonitor) {
+      try {
+        const entry = await this.opts.emergencyMonitor.captureEntry(
+          intent.token,
+          quoteToken,
+          now,
+          intent.meta ?? {},
+        )
+        intent.meta = { ...(intent.meta ?? {}), emergencyEntry: entry }
+      } catch (err) {
+        this.lastError = err instanceof Error ? err.message : String(err)
+        // Entry-snapshot capture failing must never block the buy itself — it
+        // just means this position falls back to the neutral (never-trips)
+        // baseline until a later mechanism (there is none yet) backfills it.
       }
     }
 
     // ── execute ────────────────────────────────────────────────────────────────
     let txHash: Hash | null = null
     let amountOut = sim.amountOut
+    let orderState: OrderState | null = null
+    let idempotencyKey: string | null = null
     if (this.mode === 'live') {
       const executed = this.opts.executor
         ? await this.executeLiveViaExecutor(this.opts.executor, intent, sim, slippageBps, now)
         : await this.executeLive(intent, sim, slippageBps)
       if (!executed) {
-        refuse('no_route', 'live execution failed (see logs)')
-        return
+        return refuse('no_route', 'live execution failed (see logs)')
       }
       txHash = executed.hash
+      orderState = executed.orderState
+      idempotencyKey = executed.idempotencyKey
       // Real reconciled fill (Level 6) when available; otherwise the
       // conservative quoted floor (amountOutMinimum), as before.
       amountOut = executed.actualAmountOut ?? executed.amountOutMinimum
@@ -374,6 +470,13 @@ export class Agent {
     } else if (realizedPnlDelta !== null) {
       this.opts.reportTradeResult?.(realizedPnlDelta)
     }
+    if (this.mode === 'live') {
+      void this.opts.telegramAlerter?.send(
+        intent.side === 'buy' ? 'REAL_BUY' : 'REAL_SELL',
+        `${intent.tokenSymbol} $${round(notionalUsd)} tx=${txHash ?? 'n/a'}`,
+      )
+    }
+    return { success: true, txHash, idempotencyKey, orderState, refusalReason: null }
   }
 
   /**
@@ -415,7 +518,13 @@ export class Agent {
       return null // FAILED, or still genuinely in flight for a duplicate signal — see Executor's doc comment
     }
     const minOut = (sim.amountOut * BigInt(10_000 - slippageBps)) / 10_000n
-    return { hash: order.txHash as Hash, amountOutMinimum: minOut, actualAmountOut: order.actualAmountOut }
+    return {
+      hash: order.txHash as Hash,
+      amountOutMinimum: minOut,
+      actualAmountOut: order.actualAmountOut,
+      orderState: order.state,
+      idempotencyKey,
+    }
   }
 
   private async executeLive(
@@ -439,7 +548,13 @@ export class Agent {
         chain: this.market.client.chain,
       })
       await this.market.client.public.waitForTransactionReceipt({ hash })
-      return { hash, amountOutMinimum: tx.amountOutMinimum, actualAmountOut: null }
+      return {
+        hash,
+        amountOutMinimum: tx.amountOutMinimum,
+        actualAmountOut: null,
+        orderState: null,
+        idempotencyKey: null,
+      }
     } catch (err) {
       this.lastError = err instanceof Error ? err.message : String(err)
       return null
@@ -490,22 +605,171 @@ export class Agent {
     return realizedDelta
   }
 
-  /** Mark every open position to its live exit value (a real sell-side quote). */
+  /**
+   * Mark every open position to its live exit value (a real sell-side
+   * quote). Also computes, at zero extra IO cost, the two emergency-exit
+   * signals Agent owns outright (see exits/emergency-monitor.ts):
+   * `sellQuoteOk` (has the sell-quote failed `SELL_QUOTE_FAIL_STREAK_THRESHOLD`
+   * ticks IN A ROW — a single blip is treated as noise, not a honeypot
+   * signature, since a transient RPC hiccup is far more common than a real
+   * sudden total loss of sellability) and `quoteAnomalyDetected` (did the
+   * mark crash more than `QUOTE_ANOMALY_DROP_RATIO` in a single tick) —
+   * stored in `pos.meta` so monitorPositions can read them without
+   * recomputing.
+   */
   private async markPositions(now: number): Promise<void> {
     for (const pos of this.positions.values()) {
+      const prevMarkUsd = pos.markUsd
+      const failStreak = (pos.meta.sellQuoteFailStreak as number | undefined) ?? 0
       const q = await this.market.quoteSell(pos.token, pos.quoteToken, pos.amount)
-      if (!q) {
+      if (!q || q.amountOut <= 0n) {
         pos.markUsd = null
+        const newFailStreak = failStreak + 1
+        pos.meta.sellQuoteFailStreak = newFailStreak
+        pos.meta.sellQuoteOk = newFailStreak < SELL_QUOTE_FAIL_STREAK_THRESHOLD
+        pos.meta.quoteAnomalyDetected = false
         continue
       }
+      pos.meta.sellQuoteFailStreak = 0
+      pos.meta.sellQuoteOk = true
       const quoteDecimals = pos.quoteSymbol === 'USDG' ? this.market.usdgDecimals : 18
       const ethUsd = pos.quoteSymbol === 'WETH' ? await this.market.ethUsd(30_000, now) : 1
       if (ethUsd === null) {
         pos.markUsd = null
+        pos.meta.quoteAnomalyDetected = false
         continue
       }
       pos.markUsd = Number(formatUnits(q.amountOut, quoteDecimals)) * ethUsd
+      pos.meta.quoteAnomalyDetected =
+        prevMarkUsd !== null && prevMarkUsd > 0 && pos.markUsd < prevMarkUsd * (1 - QUOTE_ANOMALY_DROP_RATIO)
     }
+  }
+
+  /**
+   * Level 10.1 — the emergency-exit layer. Runs every tick, for every open
+   * position, in every mode (Shadow/Paper/Probe/Live all go through
+   * Agent.tick() -> markPositions() -> here), independent of whatever the
+   * strategy itself would decide this tick. Never calls out to an LLM/JEV —
+   * `checkEmergencyExit` is pure, synchronous logic over already-fetched
+   * signals, so there is nothing to "wait for".
+   */
+  private async monitorPositions(now: number): Promise<void> {
+    for (const pos of [...this.positions.values()]) {
+      const key = positionKey(pos)
+      if (this.emergencyExitInFlight.has(key)) continue // an attempt for this exact position is already running this tick
+      const trigger = await this.evaluateEmergencyExit(pos, now)
+      if (!trigger) continue
+      this.emergencyExitInFlight.add(key)
+      try {
+        await this.fireEmergencyExit(pos, trigger, now)
+      } finally {
+        this.emergencyExitInFlight.delete(key)
+      }
+    }
+  }
+
+  private async evaluateEmergencyExit(
+    pos: Position,
+    now: number,
+  ): Promise<{ reasons: string[]; input: ReturnType<typeof buildEmergencyExitInput> } | null> {
+    const entry = (pos.meta.emergencyEntry as EmergencyEntrySnapshot | undefined) ?? NEUTRAL_ENTRY_SNAPSHOT
+    const rescanIntervalMs = this.opts.emergencyRescanIntervalMs ?? 60_000
+    const lastScanAt = (pos.meta.lastEmergencyScanAt as number | undefined) ?? 0
+    let scanned = (pos.meta.lastEmergencySignals as Record<string, unknown> | undefined) ?? {}
+    if (this.opts.emergencyMonitor && now - lastScanAt >= rescanIntervalMs) {
+      try {
+        scanned = await this.opts.emergencyMonitor.currentSignals(pos.token, pos.quoteToken, entry, now)
+        pos.meta.lastEmergencyScanAt = now
+        pos.meta.lastEmergencySignals = scanned
+      } catch (err) {
+        // A failed rescan must not itself trigger or suppress an emergency
+        // exit — fail open on this EXTRA layer only, keep whatever was
+        // cached (or the neutral default on the very first scan).
+        this.lastError = err instanceof Error ? err.message : String(err)
+      }
+    }
+    const input = buildEmergencyExitInput(entry, scanned, {
+      currentlySellable: pos.meta.sellQuoteOk !== false,
+      quoteAnomalyDetected: pos.meta.quoteAnomalyDetected === true,
+    })
+    const verdict = checkEmergencyExit(input)
+    return verdict.shouldExit ? { reasons: verdict.reasons, input } : null
+  }
+
+  /**
+   * Journals the trigger (position id, token, reasons, the full signal
+   * snapshot, current mark, liquidity, sellability, timestamp) BEFORE
+   * attempting the sell, then attempts a full exit through the exact same
+   * `processIntent` pipeline every other order goes through — same risk
+   * gate, same kill-switch respect, same Level 6 execution when live — and
+   * journals the outcome (order id, result, reconciliation state)
+   * afterward. A failed sell leaves the position exactly as `processIntent`
+   * always leaves a refused/failed order: untouched, since `applyFill` is
+   * only ever reached on the success path.
+   */
+  private async fireEmergencyExit(
+    pos: Position,
+    trigger: { reasons: string[]; input: ReturnType<typeof buildEmergencyExitInput> },
+    now: number,
+  ): Promise<void> {
+    const key = positionKey(pos)
+    const idempotencyKey = `emergency-exit:${key}`
+    this.journal.recordDecision({
+      agentId: this.id,
+      ts: now,
+      kind: 'emergency_exit',
+      detail: `EMERGENCY EXIT ${pos.tokenSymbol}: ${trigger.reasons.join(', ')}`,
+      meta: {
+        positionId: key,
+        token: pos.token,
+        trigger: trigger.reasons,
+        triggerValues: trigger.input,
+        timestamp: now,
+        currentQuote: pos.markUsd,
+        liquidity: trigger.input.currentLiquidityScore,
+        sellability: trigger.input.currentlySellable,
+        phase: 'triggered',
+      },
+    })
+
+    const sellIntent: Intent = {
+      side: 'sell',
+      token: pos.token,
+      tokenSymbol: pos.tokenSymbol,
+      amountIn: pos.amount,
+      quoteToken: pos.quoteToken,
+      quoteSymbol: pos.quoteSymbol,
+      reason: `EMERGENCY EXIT: ${trigger.reasons.join(', ')}`,
+      meta: { idempotencyKey, emergencyExit: true, positionId: key, trigger: trigger.reasons },
+    }
+    const outcome = await this.processIntent(sellIntent, now)
+
+    this.journal.recordDecision({
+      agentId: this.id,
+      ts: now,
+      kind: 'emergency_exit',
+      detail: `EMERGENCY EXIT ${pos.tokenSymbol} result: ${outcome.success ? 'sold' : `failed (${outcome.refusalReason})`}`,
+      meta: {
+        positionId: key,
+        token: pos.token,
+        trigger: trigger.reasons,
+        triggerValues: trigger.input,
+        timestamp: now,
+        currentQuote: pos.markUsd,
+        liquidity: trigger.input.currentLiquidityScore,
+        sellability: trigger.input.currentlySellable,
+        phase: 'resolved',
+        orderId: outcome.idempotencyKey,
+        txHash: outcome.txHash,
+        result: outcome.success ? 'sold' : 'failed',
+        reconciliationResult: outcome.orderState,
+        refusalReason: outcome.refusalReason,
+      },
+    })
+    void this.opts.telegramAlerter?.send(
+      'EMERGENCY_EXIT',
+      `${pos.tokenSymbol}: ${trigger.reasons.join(', ')} — ${outcome.success ? 'sold' : `sell FAILED (${outcome.refusalReason})`}`,
+    )
   }
 
   private openValueUsd(): number {

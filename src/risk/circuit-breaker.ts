@@ -8,6 +8,8 @@ export type BreakerCondition =
   | 'price_oracle_disagreement'
   | 'nonce_failure'
   | 'reconciliation_mismatch'
+  /** Level 10.1 addition (not one of the original spec's nine) — an operator's `/pause` Telegram command (see alerts/telegram-commands.ts). Same buy-pause/sell-exempt semantics as every other condition. */
+  | 'manual_pause'
 
 export interface TrippedBreaker {
   condition: BreakerCondition
@@ -16,7 +18,8 @@ export interface TrippedBreaker {
 }
 
 /**
- * The spec's nine named circuit breakers. Tripping ANY of them pauses NEW
+ * The spec's nine named circuit breakers, plus a Level 10.1 tenth
+ * (`manual_pause`, a Telegram `/pause`). Tripping ANY of them pauses NEW
  * BUYS only — sells are never blocked here (see the class's `buyPaused`
  * naming; there is deliberately no `sellPaused`). A position already open
  * when something goes wrong must still be closable; refusing to let it sell

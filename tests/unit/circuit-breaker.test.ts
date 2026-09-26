@@ -72,7 +72,7 @@ describe('CircuitBreaker — BUY_PAUSED / SELL_ENABLED', () => {
     expect(listener).not.toHaveBeenCalled()
   })
 
-  it('covers all nine named conditions without a typo (compile-time exhaustiveness via the type, runtime smoke test here)', () => {
+  it('covers all nine original named conditions without a typo (compile-time exhaustiveness via the type, runtime smoke test here)', () => {
     const cb = new CircuitBreaker()
     const all = [
       'rpc_unhealthy',
@@ -87,5 +87,13 @@ describe('CircuitBreaker — BUY_PAUSED / SELL_ENABLED', () => {
     ] as const
     for (const c of all) cb.trip(c, 'x')
     expect(cb.activeConditions()).toHaveLength(9)
+  })
+
+  it('the Level 10.1 tenth condition (manual_pause, a Telegram /pause) pauses buys the same as any other', () => {
+    const cb = new CircuitBreaker()
+    cb.trip('manual_pause', 'paused via Telegram command')
+    expect(cb.buyPaused()).toBe(true)
+    cb.clear('manual_pause')
+    expect(cb.buyPaused()).toBe(false)
   })
 })

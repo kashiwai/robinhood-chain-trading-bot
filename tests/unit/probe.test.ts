@@ -56,6 +56,7 @@ describe('ProbeEngine', () => {
       measuredBuyTaxBps: null,
       measuredSellTaxBps: null,
       ts: 0,
+      failureClass: 'PERMANENT_TOKEN_FAILURE',
     })
     const execute = vi.fn()
     const engine = new ProbeEngine({
@@ -94,7 +95,7 @@ describe('ProbeEngine', () => {
     expect(execute).not.toHaveBeenCalled()
   })
 
-  it('no buy route at probe size blacklists the token', async () => {
+  it('no buy route at probe size is a MARKET_FAILURE — quarantined, NOT permanently blacklisted', async () => {
     const probeStore = new ProbeStore(':memory:')
     const execute = vi.fn()
     const market = new FakeMarket() // no buyRoutes configured
@@ -102,7 +103,9 @@ describe('ProbeEngine', () => {
 
     const result = await engine.runProbe(input())
     expect(result.passed).toBe(false)
-    expect(probeStore.isBlacklisted(TOKEN)).toBe(true)
+    expect(result.failureClass).toBe('MARKET_FAILURE')
+    expect(probeStore.isBlacklisted(TOKEN)).toBe(false)
+    expect(probeStore.isQuarantined(TOKEN, Date.now(), 30 * 60_000)).toBe(true)
     expect(execute).not.toHaveBeenCalled()
   })
 

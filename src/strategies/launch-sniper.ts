@@ -235,7 +235,7 @@ export class LaunchSniper implements Strategy {
         quoteToken: ctx.quoteToken,
         quoteSymbol: ctx.quoteSymbol,
         reason: `sniped ${launch.launchpad} launch — retention ${(retention * 100).toFixed(1)}%, deployer ${deployerPct === null ? 'n/a' : (deployerPct * 100).toFixed(1) + '%'}`,
-        meta: { launchpad: launch.launchpad, deployerPct, retention },
+        meta: { launchpad: launch.launchpad, deployerPct, retention, deployerAddress: launch.creator },
       },
     }
   }

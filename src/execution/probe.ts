@@ -2,15 +2,22 @@ import { parseUnits, type Address } from 'viem'
 import type { Market } from '../framework/market.js'
 import type { Executor } from './executor.js'
 import { ProbeStore } from './probe-store.js'
+import { classifyProbeFailure, type ProbeFailureClass } from './probe-failure.js'
 
 export interface ProbeConfig {
   /** USD size of the probe buy. @defaultValue 2 */
   probeBuyUsd: number
   /** Fraction of the actual probe fill to sell back. @defaultValue 0.5 */
   probeSellFraction: number
+  /** How long a TEMPORARY_INFRA_FAILURE/MARKET_FAILURE token stays quarantined before a retry is allowed (see probe-store.ts's isQuarantined). @defaultValue 1800000 (30 min) */
+  quarantineCooldownMs: number
 }
 
-export const DEFAULT_PROBE_CONFIG: ProbeConfig = { probeBuyUsd: 2, probeSellFraction: 0.5 }
+export const DEFAULT_PROBE_CONFIG: ProbeConfig = {
+  probeBuyUsd: 2,
+  probeSellFraction: 0.5,
+  quarantineCooldownMs: 30 * 60_000,
+}
 
 export interface ProbeEngineOptions {
   executor: Pick<Executor, 'execute'>
@@ -35,6 +42,8 @@ export interface ProbeResult {
   reason: string
   measuredBuyTaxBps: number | null
   measuredSellTaxBps: number | null
+  /** null when `passed`; otherwise the Level 10.1 classification (see execution/probe-failure.ts) — only PERMANENT_TOKEN_FAILURE blacklists. */
+  failureClass: ProbeFailureClass | null
 }
 
 /**
@@ -58,12 +67,29 @@ export class ProbeEngine {
     this.probeStore = opts.probeStore
   }
 
-  async runProbe(input: RunProbeInput): Promise<ProbeResult> {
+  async runProbe(input: RunProbeInput, now = Date.now()): Promise<ProbeResult> {
     if (this.probeStore.isBlacklisted(input.token)) {
-      return this.result(input.token, false, 'blacklisted from a prior failed probe', null, null)
+      return this.result(
+        input.token,
+        false,
+        'blacklisted from a prior failed probe',
+        null,
+        null,
+        'PERMANENT_TOKEN_FAILURE',
+      )
     }
     if (this.probeStore.hasPassed(input.token)) {
-      return this.result(input.token, true, 'already probe-passed', null, null)
+      return this.result(input.token, true, 'already probe-passed', null, null, null)
+    }
+    if (this.probeStore.isQuarantined(input.token, now, this.config.quarantineCooldownMs)) {
+      return this.result(
+        input.token,
+        false,
+        'quarantined from a prior temporary/market failure — cooldown has not elapsed yet',
+        null,
+        null,
+        this.probeStore.get(input.token)?.failureClass ?? null,
+      )
     }
 
     const probeTokenAmount = this.config.probeBuyUsd / input.quoteTokenUsdPrice
@@ -128,10 +154,18 @@ export class ProbeEngine {
       measuredSellTaxBps,
       ts: Date.now(),
     })
-    return { token: input.token, passed: true, reason, measuredBuyTaxBps, measuredSellTaxBps }
+    return {
+      token: input.token,
+      passed: true,
+      reason,
+      measuredBuyTaxBps,
+      measuredSellTaxBps,
+      failureClass: null,
+    }
   }
 
   private fail(token: Address, reason: string): ProbeResult {
+    const failureClass = classifyProbeFailure(reason)
     this.probeStore.record({
       token,
       passed: false,
@@ -139,8 +173,9 @@ export class ProbeEngine {
       measuredBuyTaxBps: null,
       measuredSellTaxBps: null,
       ts: Date.now(),
+      failureClass,
     })
-    return this.result(token, false, reason, null, null)
+    return this.result(token, false, reason, null, null, failureClass)
   }
 
   private result(
@@ -149,8 +184,9 @@ export class ProbeEngine {
     reason: string,
     measuredBuyTaxBps: number | null,
     measuredSellTaxBps: number | null,
+    failureClass: ProbeFailureClass | null,
   ): ProbeResult {
-    return { token, passed, reason, measuredBuyTaxBps, measuredSellTaxBps }
+    return { token, passed, reason, measuredBuyTaxBps, measuredSellTaxBps, failureClass }
   }
 }
 

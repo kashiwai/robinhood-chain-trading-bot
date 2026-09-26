@@ -10,6 +10,8 @@ import type { Strategy } from './strategy.js'
 import type { AgentStatus, Mode, RiskLimits } from './types.js'
 import type { Executor } from '../execution/executor.js'
 import type { ProbeGate } from '../execution/probe-gate.js'
+import type { EmergencyMonitorHooks } from '../exits/emergency-monitor.js'
+import type { TelegramAlerter } from '../alerts/telegram.js'
 import type { CircuitBreaker } from '../risk/circuit-breaker.js'
 import { DEFAULT_RISK_PROFILE, type AccountRiskProfile } from '../risk/risk-profile.js'
 import type { AccountRiskContext } from '../risk/account-risk.js'
@@ -27,6 +29,10 @@ export interface AgentSpec {
   circuitBreaker?: CircuitBreaker
   /** Level 10 probe gate — see agent.ts's AgentOptions.probeGate doc comment. */
   probeGate?: ProbeGate
+  /** Level 10.1 emergency-exit scanners — see agent.ts's AgentOptions.emergencyMonitor doc comment. */
+  emergencyMonitor?: EmergencyMonitorHooks
+  /** Level 10.1 Telegram critical alerts — see agent.ts's AgentOptions.telegramAlerter doc comment. */
+  telegramAlerter?: Pick<TelegramAlerter, 'send'>
 }
 
 /** Aggregate fleet numbers for the dashboard header. */
@@ -100,6 +106,8 @@ export class Fleet {
           executor: spec.executor,
           circuitBreaker: spec.circuitBreaker,
           probeGate: spec.probeGate,
+          emergencyMonitor: spec.emergencyMonitor,
+          telegramAlerter: spec.telegramAlerter,
           accountRisk: {
             profile: this.riskProfile,
             contextProvider: (candidateUsd) => this.accountRiskContext(candidateUsd),
